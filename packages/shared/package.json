@@ -1,0 +1,17 @@
+{
+  "name": "@polymarket-btc/shared",
+  "version": "1.0.0",
+  "description": "Shared contracts, types, and schemas for the Polymarket BTC Execution Terminal",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  }
+}

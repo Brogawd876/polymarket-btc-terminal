@@ -1,0 +1,18 @@
+node_modules/
+dist/
+.output/
+.wxt/
+coverage/
+playwright-report/
+test-results/
+
+# Env
+.env
+.env.local
+
+# Data
+data/*.sqlite
+data/*.sqlite-journal
+logs/*.log
+!data/.gitkeep
+!logs/.gitkeep
