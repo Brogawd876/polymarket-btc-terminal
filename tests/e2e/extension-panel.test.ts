@@ -1,17 +1,15 @@
 import { test, expect, chromium } from '@playwright/test';
 import path from 'path';
-import { fileURLToPath } from 'url';
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 test.describe('Polymarket Extension Execution Panel', () => {
   let browserContext: any;
 
   test.beforeAll(async () => {
-    const extensionPath = path.resolve(__dirname, '../../apps/extension/dist');
+    const extensionPath = path.resolve(__dirname, '../../apps/extension/dist/chrome-mv3');
     browserContext = await chromium.launchPersistentContext('', {
-      headless: false,
+      headless: true,
       args: [
+        `--headless=new`,
         `--disable-extensions-except=${extensionPath}`,
         `--load-extension=${extensionPath}`
       ]
