@@ -4,11 +4,27 @@ import { WsEventSchema } from '@polymarket-btc/shared';
 export default defineBackground(() => {
   let ws: WebSocket | null = null;
   let reconnectTimeout: NodeJS.Timeout;
+  let pingInterval: ReturnType<typeof setInterval> | null = null;
+
+  function startKeepAlive() {
+    if (pingInterval) clearInterval(pingInterval);
+    pingInterval = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'PING' }));
+      }
+    }, 20000);
+  }
+
+  function stopKeepAlive() {
+    if (pingInterval) clearInterval(pingInterval);
+    pingInterval = null;
+  }
 
   const connect = () => {
     ws = new WebSocket('ws://127.0.0.1:3001/ws');
 
     ws.onopen = () => {
+      startKeepAlive();
       chrome.runtime.sendMessage({ type: 'WS_STATUS', payload: true }).catch(() => {});
     };
 
@@ -25,6 +41,7 @@ export default defineBackground(() => {
     };
 
     ws.onclose = () => {
+      stopKeepAlive();
       chrome.runtime.sendMessage({ type: 'WS_STATUS', payload: false }).catch(() => {});
       clearTimeout(reconnectTimeout);
       reconnectTimeout = setTimeout(connect, 3000);
@@ -34,7 +51,11 @@ export default defineBackground(() => {
   connect();
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    // Only accept messages from extension pages/content scripts
+    if (!sender.id || sender.id !== chrome.runtime.id) return;
     if (message.type === 'SEND_WS') {
+      // Validate payload shape
+      if (!message.payload || typeof message.payload.type !== 'string') return;
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(message.payload));
       }

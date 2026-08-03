@@ -2,12 +2,12 @@ import { Order, MarketState, Side, OrderStatus } from '@polymarket-btc/shared';
 import { ethers } from 'ethers';
 import WebSocket from 'ws';
 import * as dotenv from 'dotenv';
+import { ClobClient, Side as ClobSide } from '@polymarket/clob-client';
 
 dotenv.config();
 
 const PRIVATE_KEY = process.env.PRIVATE_KEY || '';
-const POLYMARKET_API_KEY = process.env.POLYMARKET_API_KEY || '';
-const POLYMARKET_CLOB_URL = 'https://clob.polymarket.com/order';
+const POLYMARKET_API_KEY = process.env.POLYMARKET_API_KEY || process.env.BUILDER_KEY || '';
 const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
 
 // Interface matching the Master Implementation Prompt
@@ -16,7 +16,7 @@ export interface TradingAdapter {
   shutdown(): Promise<void>;
   placeOrder(marketId: string, side: Side, size: string, price: string): Promise<Order>;
   cancelOrder(orderId: string): Promise<boolean>;
-  getMarketState(marketId: string): Promise<MarketState>;
+  getMarketState(marketId: string): Promise<any>;
 }
 
 export class PolymarketAdapter implements TradingAdapter {
@@ -24,16 +24,37 @@ export class PolymarketAdapter implements TradingAdapter {
   private marketCache: Map<string, MarketState> = new Map();
   private ws: WebSocket | null = null;
   private wallet: ethers.Wallet;
+  private clobClient!: ClobClient;
 
   constructor() {
     if (!PRIVATE_KEY) {
       console.warn('PRIVATE_KEY is not set in environment.');
     }
     this.wallet = new ethers.Wallet(PRIVATE_KEY || ethers.Wallet.createRandom().privateKey);
+    delete process.env.PRIVATE_KEY;
   }
 
   async initialize(): Promise<void> {
     console.log('Initializing Polymarket Adapter...');
+    
+    this.clobClient = new ClobClient(
+      'https://clob.polymarket.com', 
+      137, 
+      this.wallet
+    );
+    const creds = await this.clobClient.createOrDeriveApiKey();
+    this.clobClient = new ClobClient(
+      'https://clob.polymarket.com', 
+      137, 
+      this.wallet,
+      creds
+    );
+    
+    if (this.ws) {
+      this.ws.removeAllListeners();
+      this.ws.terminate();
+      this.ws = null;
+    }
     
     this.ws = new WebSocket(WS_URL);
     
@@ -48,13 +69,13 @@ export class PolymarketAdapter implements TradingAdapter {
       try {
         const parsed = JSON.parse(data.toString());
         if (parsed.marketId) {
+          const lastPriceNum = parsed.lastPrice ? parseFloat(parsed.lastPrice) : 0;
           const state: MarketState = {
-            id: parsed.marketId,
-            bids: parsed.bids || [],
-            asks: parsed.asks || [],
-            lastPrice: parsed.lastPrice || '0',
-            volume24h: parsed.volume || '0',
-            timestamp: Date.now()
+            marketId: parsed.marketId,
+            yesPrice: parsed.lastPrice || '0',
+            noPrice: lastPriceNum ? (1 - lastPriceNum).toFixed(2) : '0',
+            status: 'OPEN',
+            lastUpdated: Date.now()
           };
           this.marketCache.set(parsed.marketId, state);
         }
@@ -65,6 +86,11 @@ export class PolymarketAdapter implements TradingAdapter {
 
     this.ws.on('error', (err) => {
       console.error('WebSocket error:', err);
+    });
+
+    this.ws.on('close', () => {
+      console.log('WebSocket closed, attempting to reconnect...');
+      setTimeout(() => this.initialize(), 3000);
     });
 
     this.isConnected = true;
@@ -82,73 +108,25 @@ export class PolymarketAdapter implements TradingAdapter {
   async placeOrder(marketId: string, side: Side, size: string, price: string): Promise<Order> {
     if (!this.isConnected) throw new Error('Adapter not connected');
     
-    // EIP-712 Order Signature mock structure
-    const domain = {
-      name: 'Polymarket CTF Exchange',
-      version: '1',
-      chainId: 137,
-      verifyingContract: '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E'
-    };
-    
-    const types = {
-      Order: [
-        { name: 'salt', type: 'uint256' },
-        { name: 'maker', type: 'address' },
-        { name: 'signer', type: 'address' },
-        { name: 'taker', type: 'address' },
-        { name: 'tokenId', type: 'uint256' },
-        { name: 'makerAmount', type: 'uint256' },
-        { name: 'takerAmount', type: 'uint256' },
-        { name: 'expiration', type: 'uint256' },
-        { name: 'nonce', type: 'uint256' },
-        { name: 'feeRateBps', type: 'uint256' },
-        { name: 'side', type: 'uint8' },
-        { name: 'signatureType', type: 'uint8' }
-      ]
-    };
-    
-    const orderData = {
-      salt: Date.now(),
-      maker: this.wallet.address,
-      signer: this.wallet.address,
-      taker: '0x0000000000000000000000000000000000000000',
-      tokenId: marketId,
-      makerAmount: size,
-      takerAmount: price,
-      expiration: Math.floor(Date.now() / 1000) + 3600,
-      nonce: 0,
+    const orderArgs = {
+      tokenID: marketId,
+      price: Number(parseFloat(String(price)).toFixed(2)),
+      side: side === 'BUY' ? ClobSide.BUY : ClobSide.SELL,
+      size: Number(parseFloat(String(size)).toFixed(2)),
       feeRateBps: 0,
-      side: side === 'BUY' ? 0 : 1,
-      signatureType: 2
+      nonce: 0
     };
 
-    const signature = await this.wallet.signTypedData(domain, types, orderData);
-    
-    const orderPayload = {
-      order: orderData,
-      signature,
-      owner: this.wallet.address
-    };
-    
     try {
-      const response = await fetch(POLYMARKET_CLOB_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${POLYMARKET_API_KEY}`
-        },
-        body: JSON.stringify(orderPayload)
-      });
+      const signedOrder = await this.clobClient.createOrder(orderArgs);
+      const response = await this.clobClient.postOrder(signedOrder);
       
-      let responseData;
-      try {
-         responseData = await response.json();
-      } catch (e) {
-         responseData = { error: await response.text() };
+      if (response.error) {
+         throw new Error(`Polymarket API error: ${response.error}`);
       }
       
       const order: Order = {
-        id: responseData.orderID || `0x${Date.now().toString(16)}`,
+        id: response.orderID || `0x${Date.now().toString(16)}`,
         marketId,
         side,
         size,
@@ -167,14 +145,18 @@ export class PolymarketAdapter implements TradingAdapter {
 
   async cancelOrder(orderId: string): Promise<boolean> {
     if (!this.isConnected) throw new Error('Adapter not connected');
+    await this.clobClient.cancelOrder({ orderID: orderId }); 
     console.log(`Cancelled order: ${orderId}`);
     return true;
   }
 
-  async getMarketState(marketId: string): Promise<MarketState> {
+  async getMarketState(marketId: string): Promise<any> {
     const state = this.marketCache.get(marketId);
-    if (!state) {
-      throw new Error(`Market ${marketId} not found or stale`);
+    if (!state) return null;
+    // 10 second staleness guard
+    if (Date.now() - state.lastUpdated > 10000) {
+      console.warn(`Market ${marketId} data is stale (>10s old)`);
+      return { ...state, stale: true };
     }
     return state;
   }

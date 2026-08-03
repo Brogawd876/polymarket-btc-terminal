@@ -45,7 +45,7 @@ export function useWebSocket(url: string) {
   }, []);
 
   const sendMessage = useCallback((msg: any) => {
-    chrome.runtime.sendMessage({ type: 'SEND_WS', payload: msg });
+    chrome.runtime.sendMessage({ type: 'SEND_WS', payload: msg })?.catch(() => {});
   }, []);
 
   return { connected, marketInfo, orders, sendMessage };

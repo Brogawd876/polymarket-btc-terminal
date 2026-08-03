@@ -2,16 +2,27 @@ import Fastify from 'fastify';
 import pino from 'pino';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
+import fastifyWebsocket from '@fastify/websocket';
 import { setupDb } from './db';
 import { registerRoutes } from './routes';
+import { PolymarketAdapter } from './integrations/polymarket/adapter';
+
+export const adapter = new PolymarketAdapter();
 
 const app = Fastify({ logger: true });
 
+let db: ReturnType<typeof setupDb>;
+
 async function start() {
   try {
-    await app.register(cors);
+    await app.register(cors, {
+      origin: ['http://localhost', 'http://127.0.0.1'],
+      methods: ['GET', 'POST']
+    });
     await app.register(rateLimit);
-    setupDb();
+    await app.register(fastifyWebsocket);
+    db = setupDb();
+    await adapter.initialize();
     await registerRoutes(app);
     await app.listen({ port: 3001, host: '127.0.0.1' });
     app.log.info('Server started on port 3001');
@@ -21,3 +32,13 @@ async function start() {
   }
 }
 start();
+
+const shutdown = async () => {
+  console.log('Shutting down gracefully...');
+  try { adapter.shutdown(); } catch(e) {}
+  try { if (db) db.close(); } catch(e) {}
+  await app.close();
+  process.exit(0);
+};
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

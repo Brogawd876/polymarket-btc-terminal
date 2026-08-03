@@ -1,37 +1,54 @@
-import React, { useState } from 'react';
-import type { MarketState, WsEvent, Side } from '@polymarket-btc/shared';
+import React, { useState, useEffect } from 'react';
+import type { MarketState, WsEvent, Side, Order } from '@polymarket-btc/shared';
 import { Loader2 } from 'lucide-react';
 
 interface Props {
   marketInfo: MarketState | null;
   sendMessage: (msg: any) => void;
+  orders?: Order[];
 }
 
-const TradingPanel: React.FC<Props> = ({ marketInfo, sendMessage }) => {
+const TradingPanel: React.FC<Props> = ({ marketInfo, sendMessage, orders = [] }) => {
   const [size, setSize] = useState('100');
   const [price, setPrice] = useState('0.50');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    setIsSubmitting(false);
+  }, [orders]);
+
+  useEffect(() => {
+    const listener = (message: any) => {
+      if (message.type === 'WS_EVENT' && (message.payload.type === 'ORDER_UPDATE' || message.payload.type === 'ERROR')) {
+        setIsSubmitting(false);
+      }
+    };
+    chrome.runtime.onMessage.addListener(listener);
+    return () => chrome.runtime.onMessage.removeListener(listener);
+  }, []);
   
   if (!marketInfo) {
     return <div className="text-center text-gray-500 mt-10">Waiting for market data...</div>;
   }
 
   const handleTrade = (side: Side) => {
-    const numPrice = parseFloat(price);
-    if (isNaN(numPrice) || numPrice < 0.01 || numPrice > 0.99) {
-      alert("Price must be between 0.01 and 0.99");
+    if (!/^(0\.[0-9]+)$/.test(price) || price === '0.00' || price === '0.0') {
+      setError("Price must be between 0.01 and 0.99");
       return;
     }
+    const parsedSize = parseFloat(size);
+    if (isNaN(parsedSize) || parsedSize <= 0 || parsedSize > 10000) {
+      setError("Size must be between 0 and 10000");
+      return;
+    }
+    setError('');
 
     setIsSubmitting(true);
     sendMessage({
       type: 'PLACE_ORDER',
       payload: { marketId: marketInfo.marketId, side, size, price }
     });
-
-    setTimeout(() => {
-      setIsSubmitting(false);
-    }, 1000);
   };
 
   return (
@@ -68,10 +85,12 @@ const TradingPanel: React.FC<Props> = ({ marketInfo, sendMessage }) => {
         </div>
       </div>
 
+      {error && <p className="text-red-500 text-xs">{error}</p>}
+
       <div className="grid grid-cols-2 gap-4 mt-2">
         <div className="flex flex-col gap-2">
           <button 
-            onClick={() => handleTrade('YES')} 
+            onClick={() => handleTrade('BUY')} 
             disabled={isSubmitting}
             className="flex items-center justify-center bg-green-600 hover:bg-green-500 disabled:opacity-50 py-2 rounded font-bold"
           >
@@ -81,7 +100,7 @@ const TradingPanel: React.FC<Props> = ({ marketInfo, sendMessage }) => {
         </div>
         <div className="flex flex-col gap-2">
           <button 
-            onClick={() => handleTrade('NO')} 
+            onClick={() => handleTrade('SELL')} 
             disabled={isSubmitting}
             className="flex items-center justify-center bg-red-600 hover:bg-red-500 disabled:opacity-50 py-2 rounded font-bold"
           >

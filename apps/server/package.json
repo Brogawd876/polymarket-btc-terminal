@@ -5,15 +5,19 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "ts-node-dev src/index.ts"
+    "dev": "ts-node-dev src/index.ts",
+    "bundle": "esbuild src/index.ts --bundle --platform=node --target=node18 --outfile=dist/bundle.js --external:*.node",
+    "package-exe": "pnpm run bundle && pkg dist/bundle.js --target node18-win-x64 --output dist/server.exe && copy node_modules\\better-sqlite3\\build\\Release\\better_sqlite3.node dist\\"
   },
   "dependencies": {
-    "@fastify/cors": "^11.3.0",
-    "@fastify/rate-limit": "^11.2.0",
+    "@fastify/cors": "^8.5.0",
+    "@fastify/rate-limit": "^9.1.0",
+    "@fastify/websocket": "^8.3.1",
     "@polymarket-btc/shared": "workspace:*",
+    "@polymarket/clob-client": "^5.8.1",
     "better-sqlite3": "^11.3.0",
     "dotenv": "^17.4.2",
-    "ethers": "^6.17.0",
+    "ethers": "5.7.2",
     "fastify": "^4.26.1",
     "fastify-plugin": "^4.5.1",
     "pino": "^8.19.0",
@@ -23,7 +27,14 @@
     "@types/better-sqlite3": "^7.6.9",
     "@types/node": "^20.11.20",
     "@types/ws": "^8.5.10",
+    "esbuild": "^0.28.1",
+    "pkg": "^5.8.1",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.3.3"
+  },
+  "pkg": {
+    "assets": [
+      "node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+    ]
   }
 }

@@ -3,14 +3,14 @@ import { z } from 'zod';
 // Use strings for financial calculations to avoid floating point inaccuracies
 export const StringAmountSchema = z.string().regex(/^\d+(\.\d+)?$/, "Must be a valid decimal string");
 
-export const SideSchema = z.enum(['YES', 'NO']);
+export const SideSchema = z.enum(['BUY', 'SELL']);
 export type Side = z.infer<typeof SideSchema>;
 
 export const OrderStatusSchema = z.enum(['PENDING', 'FILLED', 'REJECTED', 'CANCELLED']);
 export type OrderStatus = z.infer<typeof OrderStatusSchema>;
 
 export const OrderSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string(),
   marketId: z.string(),
   side: SideSchema,
   size: StringAmountSchema,
@@ -47,6 +47,10 @@ export const WsEventSchema = z.discriminatedUnion('type', [
       size: StringAmountSchema,
       price: StringAmountSchema,
     }),
+  }),
+  z.object({
+    type: z.literal('ERROR'),
+    error: z.string(),
   }),
 ]);
 export type WsEvent = z.infer<typeof WsEventSchema>;

@@ -6,7 +6,7 @@ coverage/
 playwright-report/
 test-results/
 
-# Env
+# Env - NEVER commit credentials
 .env
 .env.local
 
@@ -16,3 +16,16 @@ data/*.sqlite-journal
 logs/*.log
 !data/.gitkeep
 !logs/.gitkeep
+
+# Native binaries & compiled executables
+*.node
+*.exe
+
+# Temp build artifacts
+apps/server/temp_build/
+apps/server/dist/
+apps/extension/dist/
+
+# OS
+.DS_Store
+Thumbs.db
