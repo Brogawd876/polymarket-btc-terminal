@@ -8,12 +8,16 @@
     "dev": "ts-node-dev src/index.ts"
   },
   "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@fastify/rate-limit": "^11.2.0",
+    "@polymarket-btc/shared": "workspace:*",
     "better-sqlite3": "^11.3.0",
+    "dotenv": "^17.4.2",
+    "ethers": "^6.17.0",
     "fastify": "^4.26.1",
     "fastify-plugin": "^4.5.1",
     "pino": "^8.19.0",
-    "ws": "^8.16.0",
-    "@polymarket-btc/shared": "workspace:*"
+    "ws": "^8.16.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.9",

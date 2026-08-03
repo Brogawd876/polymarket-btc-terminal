@@ -11,6 +11,9 @@ const dbPath = path.join(dbDir, 'terminal.db');
 export function setupDb() {
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
+  db.pragma('synchronous = NORMAL');
+  db.pragma('busy_timeout = 5000');
+  db.pragma('foreign_keys = ON');
   
   db.exec(`
     CREATE TABLE IF NOT EXISTS orders (
@@ -27,6 +30,7 @@ export function setupDb() {
       name TEXT NOT NULL,
       config TEXT NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS idx_orders_marketId ON orders(marketId);
   `);
   return db;
 }

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import type { MarketState, WsEvent, Side } from '@polymarket-btc/shared';
+import { Loader2 } from 'lucide-react';
 
 interface Props {
   marketInfo: MarketState | null;
@@ -9,16 +10,28 @@ interface Props {
 const TradingPanel: React.FC<Props> = ({ marketInfo, sendMessage }) => {
   const [size, setSize] = useState('100');
   const [price, setPrice] = useState('0.50');
+  const [isSubmitting, setIsSubmitting] = useState(false);
   
   if (!marketInfo) {
     return <div className="text-center text-gray-500 mt-10">Waiting for market data...</div>;
   }
 
   const handleTrade = (side: Side) => {
+    const numPrice = parseFloat(price);
+    if (isNaN(numPrice) || numPrice < 0.01 || numPrice > 0.99) {
+      alert("Price must be between 0.01 and 0.99");
+      return;
+    }
+
+    setIsSubmitting(true);
     sendMessage({
       type: 'PLACE_ORDER',
       payload: { marketId: marketInfo.marketId, side, size, price }
     });
+
+    setTimeout(() => {
+      setIsSubmitting(false);
+    }, 1000);
   };
 
   return (
@@ -39,6 +52,7 @@ const TradingPanel: React.FC<Props> = ({ marketInfo, sendMessage }) => {
             value={size} 
             onChange={e => setSize(e.target.value)}
             className="bg-gray-800 border border-gray-700 rounded p-1 text-white outline-none focus:border-blue-500"
+            disabled={isSubmitting}
           />
         </div>
         <div className="flex flex-col gap-1">
@@ -49,16 +63,31 @@ const TradingPanel: React.FC<Props> = ({ marketInfo, sendMessage }) => {
             value={price} 
             onChange={e => setPrice(e.target.value)}
             className="bg-gray-800 border border-gray-700 rounded p-1 text-white outline-none focus:border-blue-500"
+            disabled={isSubmitting}
           />
         </div>
       </div>
 
       <div className="grid grid-cols-2 gap-4 mt-2">
         <div className="flex flex-col gap-2">
-          <button onClick={() => handleTrade('YES')} className="bg-green-600 hover:bg-green-500 py-2 rounded font-bold">Buy YES</button>
+          <button 
+            onClick={() => handleTrade('YES')} 
+            disabled={isSubmitting}
+            className="flex items-center justify-center bg-green-600 hover:bg-green-500 disabled:opacity-50 py-2 rounded font-bold"
+          >
+            {isSubmitting && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+            Buy YES
+          </button>
         </div>
         <div className="flex flex-col gap-2">
-          <button onClick={() => handleTrade('NO')} className="bg-red-600 hover:bg-red-500 py-2 rounded font-bold">Buy NO</button>
+          <button 
+            onClick={() => handleTrade('NO')} 
+            disabled={isSubmitting}
+            className="flex items-center justify-center bg-red-600 hover:bg-red-500 disabled:opacity-50 py-2 rounded font-bold"
+          >
+            {isSubmitting && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+            Buy NO
+          </button>
         </div>
       </div>
     </div>
