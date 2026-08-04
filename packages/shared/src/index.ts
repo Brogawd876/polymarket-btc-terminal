@@ -11,7 +11,7 @@ export type OrderStatus = z.infer<typeof OrderStatusSchema>;
 
 export const OrderSchema = z.object({
   id: z.string(),
-  marketId: z.string(),
+  tokenId: z.string(),
   side: SideSchema,
   size: StringAmountSchema,
   price: StringAmountSchema,
@@ -22,6 +22,9 @@ export type Order = z.infer<typeof OrderSchema>;
 
 export const MarketStateSchema = z.object({
   marketId: z.string(),
+  conditionId: z.string(),
+  yesTokenId: z.string(),
+  noTokenId: z.string(),
   yesPrice: StringAmountSchema,
   noPrice: StringAmountSchema,
   status: z.enum(['OPEN', 'RESOLVING', 'RESOLVED']),
@@ -32,8 +35,22 @@ export type MarketState = z.infer<typeof MarketStateSchema>;
 // WebSocket Events
 export const WsEventSchema = z.discriminatedUnion('type', [
   z.object({
+    type: z.literal('SUBSCRIBE_MARKET'),
+    payload: z.object({
+      conditionId: z.string(),
+      yesTokenId: z.string(),
+      noTokenId: z.string(),
+    }),
+  }),
+  z.object({
     type: z.literal('MARKET_UPDATE'),
     payload: MarketStateSchema,
+  }),
+  z.object({
+    type: z.literal('RTDS_UPDATE'),
+    payload: z.object({
+      price: z.union([z.string(), z.number()])
+    })
   }),
   z.object({
     type: z.literal('ORDER_UPDATE'),
@@ -42,11 +59,20 @@ export const WsEventSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('PLACE_ORDER'),
     payload: z.object({
-      marketId: z.string(),
+      tokenId: z.string(),
       side: SideSchema,
       size: StringAmountSchema,
       price: StringAmountSchema,
     }),
+  }),
+  z.object({
+    type: z.literal('CANCEL_ORDER'),
+    payload: z.object({
+      orderId: z.string(),
+    }),
+  }),
+  z.object({
+    type: z.literal('PING'),
   }),
   z.object({
     type: z.literal('ERROR'),

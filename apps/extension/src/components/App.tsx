@@ -1,10 +1,13 @@
 import React, { useState } from 'react';
 import { useWebSocket } from '../hooks/useWebSocket';
 import TradingPanel from './TradingPanel';
-import { Settings, Maximize2, Minimize2, Activity } from 'lucide-react';
+import OrdersTab from './OrdersTab';
+import PositionsTab from './PositionsTab';
+import SettingsTab from './SettingsTab';
+import { Maximize2, Minimize2 } from 'lucide-react';
 
 const App: React.FC = () => {
-  const { connected, marketInfo, orders, sendMessage } = useWebSocket('ws://localhost:3001/ws');
+  const { connected, marketInfo, orders, rtdsPrice, sendMessage } = useWebSocket('ws://localhost:3001/ws');
   const [expanded, setExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<'trade' | 'orders' | 'positions' | 'settings' | 'diag'>('trade');
 
@@ -15,6 +18,9 @@ const App: React.FC = () => {
         <div className="flex items-center gap-2">
           <div className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
           <span className="font-semibold text-sm">PolyBTC Terminal</span>
+          {rtdsPrice && (
+            <span className="ml-4 text-xs font-mono text-yellow-400">BTC: {rtdsPrice}</span>
+          )}
         </div>
         <div className="flex gap-2">
           <button onClick={() => setExpanded(!expanded)} className="p-1 hover:bg-gray-700 rounded">
@@ -38,7 +44,10 @@ const App: React.FC = () => {
 
       {/* Content area */}
       <div className="flex-1 overflow-y-auto p-4 bg-gray-900">
-        {activeTab === 'trade' && <TradingPanel marketInfo={marketInfo} sendMessage={sendMessage} />}
+        {activeTab === 'trade' && <TradingPanel marketInfo={marketInfo} sendMessage={sendMessage} orders={orders} />}
+        {activeTab === 'orders' && <OrdersTab orders={orders} />}
+        {activeTab === 'positions' && <PositionsTab />}
+        {activeTab === 'settings' && <SettingsTab />}
         {activeTab === 'diag' && (
            <div className="text-xs font-mono">
              <div>WS Connected: {connected.toString()}</div>

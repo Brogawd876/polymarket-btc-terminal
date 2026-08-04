@@ -1,5 +1,8 @@
+import * as dotenv from 'dotenv';
+dotenv.config();
+
 import Fastify from 'fastify';
-import pino from 'pino';
+
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import fastifyWebsocket from '@fastify/websocket';
@@ -24,6 +27,8 @@ async function start() {
     db = setupDb();
     await adapter.initialize();
     await registerRoutes(app);
+    const { startRtds } = require('./integrations/polymarket/rtds');
+    startRtds(app);
     await app.listen({ port: 3001, host: '127.0.0.1' });
     app.log.info('Server started on port 3001');
   } catch (err) {

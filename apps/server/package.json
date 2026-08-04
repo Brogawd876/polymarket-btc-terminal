@@ -6,7 +6,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "ts-node-dev src/index.ts",
-    "bundle": "esbuild src/index.ts --bundle --platform=node --target=node18 --outfile=dist/bundle.js --external:*.node",
+    "bundle": "esbuild src/index.ts --bundle --platform=node --target=node18 --outfile=dist/bundle.js --external:better-sqlite3 --external:*.node",
     "package-exe": "pnpm run bundle && pkg dist/bundle.js --target node18-win-x64 --output dist/server.exe && copy node_modules\\better-sqlite3\\build\\Release\\better_sqlite3.node dist\\"
   },
   "dependencies": {
@@ -14,7 +14,7 @@
     "@fastify/rate-limit": "^9.1.0",
     "@fastify/websocket": "^8.3.1",
     "@polymarket-btc/shared": "workspace:*",
-    "@polymarket/clob-client": "^5.8.1",
+    "@polymarket/clob-client-v2": "1.1.0",
     "better-sqlite3": "^11.3.0",
     "dotenv": "^17.4.2",
     "ethers": "5.7.2",

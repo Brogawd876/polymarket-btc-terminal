@@ -10,43 +10,43 @@ export function useWebSocket(url: string) {
   const [connected, setConnected] = useState(false);
   const [marketInfo, setMarketInfo] = useState<MarketState | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
+  const [rtdsPrice, setRtdsPrice] = useState<string | null>(null);
 
   useEffect(() => {
-    chrome.runtime.sendMessage({ type: 'GET_WS_STATUS' }, (response) => {
-      if (response && typeof response.connected === 'boolean') {
-        setConnected(response.connected);
-      }
-    });
+    let port: chrome.runtime.Port;
+    try {
+      port = chrome.runtime.connect({ name: 'polybtc-ws' });
+    } catch (e) {
+      console.error('Failed to connect port:', e);
+      return;
+    }
 
-    const listener = (message: any) => {
+    port.onMessage.addListener((message: any) => {
+      console.log('useWebSocket received message via port:', message);
       if (message.type === 'WS_STATUS') {
         setConnected(message.payload);
+      } else if (message.type === 'DEBUG_ERROR') {
+        console.error('BACKGROUND SCRIPT VALIDATION FAILED:', message.payload);
       } else if (message.type === 'WS_EVENT') {
         const data = message.payload;
         if (data.type === 'MARKET_UPDATE') setMarketInfo(data.payload);
+        if (data.type === 'RTDS_UPDATE') setRtdsPrice(data.payload.price);
         if (data.type === 'ORDER_UPDATE') {
           setOrders(prev => {
-            const idx = prev.findIndex(o => o.id === data.payload.id);
-            if (idx >= 0) {
-              const next = [...prev];
-              next[idx] = data.payload;
-              return next;
-            }
-            return [...prev, data.payload];
+            const exists = prev.find(o => o.id === data.payload.id);
+            if (exists) return prev.map(o => o.id === data.payload.id ? data.payload : o);
+            return [data.payload, ...prev];
           });
         }
       }
-    };
+    });
 
-    chrome.runtime.onMessage.addListener(listener);
-    return () => {
-      chrome.runtime.onMessage.removeListener(listener);
-    };
+    return () => port.disconnect();
   }, []);
 
   const sendMessage = useCallback((msg: any) => {
     chrome.runtime.sendMessage({ type: 'SEND_WS', payload: msg })?.catch(() => {});
   }, []);
 
-  return { connected, marketInfo, orders, sendMessage };
+  return { connected, marketInfo, orders, rtdsPrice, sendMessage };
 }

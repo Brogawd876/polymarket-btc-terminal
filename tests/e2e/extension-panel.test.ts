@@ -25,10 +25,7 @@ test.describe('Polymarket Extension Execution Panel', () => {
     await page.goto('https://polymarket.com');
     
     // Check if the host element is injected
-    const host = page.locator('polymarket-btc-terminal'); // Based on WXT injection name
-    
-    // The extension takes some time to build and inject in an e2e context.
-    // Assuming the element exists based on the script:
-    // await expect(host).toBeAttached();
+    const host = page.locator('polymarket-btc-terminal');
+    await expect(host).toBeAttached({ timeout: 10000 });
   });
 });

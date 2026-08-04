@@ -29,3 +29,8 @@ apps/extension/dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# Extra DB ignores
+apps/server/data/*.db*
+apps/server/data/*.db-shm
+apps/server/data/*.db-wal
