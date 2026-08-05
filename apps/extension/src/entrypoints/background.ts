@@ -5,11 +5,20 @@ export default defineBackground(() => {
   let ws: WebSocket | null = null;
   let reconnectTimeout: NodeJS.Timeout;
   let pingInterval: ReturnType<typeof setInterval> | null = null;
+  let isAuthenticated = false;
+
+  let currentToken = '';
+  let snapshotState = {
+    orders: [],
+    positions: [],
+    balance: 0,
+    settings: { maxLoss: '10', maxProfit: '150' }
+  };
 
   function startKeepAlive() {
     if (pingInterval) clearInterval(pingInterval);
     pingInterval = setInterval(() => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
+      if (ws && ws.readyState === WebSocket.OPEN && isAuthenticated) {
         ws.send(JSON.stringify({ type: 'PING' }));
       }
     }, 20000);
@@ -21,8 +30,8 @@ export default defineBackground(() => {
   }
 
   const messageQueue: any[] = [];
-
   const ports = new Set<chrome.runtime.Port>();
+  const replyHandlers = new Map<string, (response: any) => void>();
 
   chrome.runtime.onConnect.addListener((port) => {
     if (port.name === 'polybtc-ws') {
@@ -30,7 +39,10 @@ export default defineBackground(() => {
       port.onDisconnect.addListener(() => {
         ports.delete(port);
       });
-      port.postMessage({ type: 'WS_STATUS', payload: ws !== null && ws.readyState === WebSocket.OPEN });
+      port.postMessage({ type: 'WS_STATUS', payload: isAuthenticated });
+      if (isAuthenticated) {
+        port.postMessage({ type: 'WS_EVENT', payload: { type: 'SNAPSHOT', payload: snapshotState } });
+      }
     }
   });
 
@@ -40,27 +52,63 @@ export default defineBackground(() => {
     }
   };
 
-  const connect = () => {
+  const fetchToken = async () => {
+    try {
+      const res = await fetch('http://127.0.0.1:3001/api/v1/token');
+      const data = await res.json();
+      return data.token;
+    } catch (e) {
+      return null;
+    }
+  };
+
+  const connect = async () => {
+    if (!currentToken) {
+      const token = await fetchToken();
+      if (token) currentToken = token;
+      else {
+        reconnectTimeout = setTimeout(connect, 3000);
+        return;
+      }
+    }
+
     ws = new WebSocket('ws://127.0.0.1:3001/ws');
 
     ws.onopen = () => {
-      // Authenticate with local server immediately
-      ws?.send(JSON.stringify({ type: 'AUTH', token: 'polymarket-local-secret' }));
+      ws?.send(JSON.stringify({ type: 'AUTH', payload: { token: currentToken } }));
       startKeepAlive();
-      broadcast({ type: 'WS_STATUS', payload: true });
-      
-      // Flush message queue
-      while(messageQueue.length > 0) {
-        ws?.send(JSON.stringify(messageQueue.shift()));
-      }
     };
 
     ws.onmessage = (event) => {
       try {
         const parsed = JSON.parse(event.data);
+        
+        if (parsed.id && replyHandlers.has(parsed.id)) {
+           const handler = replyHandlers.get(parsed.id)!;
+           handler(parsed);
+           replyHandlers.delete(parsed.id);
+        }
+
         const validation = WsEventSchema.safeParse(parsed);
         if (validation.success) {
-          broadcast({ type: 'WS_EVENT', payload: validation.data });
+          const data = validation.data;
+          if (data.type === 'AUTH_OK') {
+            isAuthenticated = true;
+            broadcast({ type: 'WS_STATUS', payload: true });
+            ws?.send(JSON.stringify({ type: 'SNAPSHOT_REQUEST' }));
+          } else if (data.type === 'AUTH_ERROR') {
+            isAuthenticated = false;
+            currentToken = ''; 
+            ws?.close();
+          } else if (data.type === 'SNAPSHOT') {
+            snapshotState = data.payload as any;
+            broadcast({ type: 'WS_EVENT', payload: data });
+            while(messageQueue.length > 0) {
+              ws?.send(JSON.stringify(messageQueue.shift()));
+            }
+          } else {
+            broadcast({ type: 'WS_EVENT', payload: data });
+          }
         } else {
           console.error('WS validation failed for payload:', parsed, validation.error);
           broadcast({ type: 'DEBUG_ERROR', payload: { parsed, error: validation.error } });
@@ -71,6 +119,7 @@ export default defineBackground(() => {
     };
 
     ws.onclose = () => {
+      isAuthenticated = false;
       stopKeepAlive();
       broadcast({ type: 'WS_STATUS', payload: false });
       clearTimeout(reconnectTimeout);
@@ -81,24 +130,27 @@ export default defineBackground(() => {
   connect();
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    // Only accept messages from extension pages/content scripts
     if (!sender.id || sender.id !== chrome.runtime.id) return;
+    
     if (message.type === 'SEND_WS') {
-      // Validate payload shape
       if (!message.payload || typeof message.payload.type !== 'string') return;
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(message.payload));
+      
+      const payloadWithId = { ...message.payload, id: crypto.randomUUID() };
+
+      if (ws && ws.readyState === WebSocket.OPEN && isAuthenticated) {
+        ws.send(JSON.stringify(payloadWithId));
       } else {
-        messageQueue.push(message.payload);
+        messageQueue.push(payloadWithId);
       }
+      
+      replyHandlers.set(payloadWithId.id, (response) => {
+        sendResponse(response);
+      });
+      return true;
     } else if (message.type === 'GET_WS_STATUS') {
-      sendResponse({ connected: ws ? ws.readyState === WebSocket.OPEN : false });
-    } else if (message.type === 'GET_BALANCE') {
-      fetch('http://127.0.0.1:3001/api/balance')
-        .then(r => r.json())
-        .then(data => sendResponse({ balance: data.balance ?? 0 }))
-        .catch(() => sendResponse({ balance: 0 }));
-      return true; // keep message channel open for async response
+      sendResponse({ connected: isAuthenticated });
+    } else if (message.type === 'GET_SNAPSHOT') {
+      sendResponse({ snapshot: snapshotState });
     }
   });
 });

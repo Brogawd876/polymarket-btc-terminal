@@ -8,13 +8,21 @@ import rateLimit from '@fastify/rate-limit';
 import fastifyWebsocket from '@fastify/websocket';
 import { setupDb } from './db';
 import { registerRoutes } from './routes';
-import { PolymarketAdapter } from './integrations/polymarket/adapter';
+import { createTradingAdapter } from './integrations/polymarket/adapters';
+import { DiscoveryService } from './integrations/polymarket/discovery';
+import crypto from 'crypto';
 
-export const adapter = new PolymarketAdapter();
+export let LOCAL_AUTH_TOKEN = process.env.WS_AUTH_TOKEN;
+if (!LOCAL_AUTH_TOKEN) {
+  LOCAL_AUTH_TOKEN = crypto.randomBytes(32).toString('hex');
+}
+
+export const adapter = createTradingAdapter();
 
 const app = Fastify({ logger: true });
 
 let db: ReturnType<typeof setupDb>;
+let discoveryService: DiscoveryService;
 
 async function start() {
   try {
@@ -26,6 +34,21 @@ async function start() {
     await app.register(fastifyWebsocket);
     db = setupDb();
     await adapter.initialize();
+    
+    discoveryService = new DiscoveryService((markets) => {
+      markets.forEach(m => adapter.updateMarketDiscovery(m));
+      // Broadcast discovery update to all WS clients
+      for (const client of app.websocketServer.clients) {
+        if (client.readyState === 1) { // WebSocket.OPEN is usually 1
+           client.send(JSON.stringify({
+             type: 'DISCOVERY_UPDATE',
+             payload: markets
+           }));
+        }
+      }
+    });
+    discoveryService.start();
+
     await registerRoutes(app);
     const { startRtds } = require('./integrations/polymarket/rtds');
     startRtds(app);

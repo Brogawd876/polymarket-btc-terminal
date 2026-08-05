@@ -9,8 +9,14 @@ import {
 export function useWebSocket(url: string) {
   const [connected, setConnected] = useState(false);
   const [marketInfo, setMarketInfo] = useState<MarketState | null>(null);
+  const [discoveredMarkets, setDiscoveredMarkets] = useState<MarketState[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
-  const [rtdsPrice, setRtdsPrice] = useState<string | null>(null);
+  const [positions, setPositions] = useState<any[]>([]);
+  const [settings, setSettings] = useState({ maxLoss: '10', maxProfit: '150' });
+  const [balance, setBalance] = useState<number>(0);
+  const [realizedPnl, setRealizedPnl] = useState<number>(0);
+  const [rtdsPrice, setRtdsPrice] = useState<number | null>(null);
+  const [rtdsMetrics, setRtdsMetrics] = useState<any>({ connected: false, stale: true, data_age: 0 });
 
   useEffect(() => {
     let port: chrome.runtime.Port;
@@ -29,8 +35,37 @@ export function useWebSocket(url: string) {
         console.error('BACKGROUND SCRIPT VALIDATION FAILED:', message.payload);
       } else if (message.type === 'WS_EVENT') {
         const data = message.payload;
-        if (data.type === 'MARKET_UPDATE') setMarketInfo(data.payload);
-        if (data.type === 'RTDS_UPDATE') setRtdsPrice(data.payload.price);
+        if (data.type === 'SNAPSHOT') {
+          setOrders(data.payload.orders || []);
+          setPositions(data.payload.positions || []);
+          setSettings(data.payload.settings || { maxLoss: '10', maxProfit: '150' });
+          if (data.payload.balance !== undefined) setBalance(data.payload.balance);
+          if (data.payload.realizedPnl !== undefined) setRealizedPnl(data.payload.realizedPnl);
+        }
+        if (data.type === 'MARKET_UPDATE') {
+           setMarketInfo(data.payload);
+           setDiscoveredMarkets(prev => {
+             const idx = prev.findIndex(m => m.marketId === data.payload.marketId);
+             if (idx >= 0) {
+               const newArr = [...prev];
+               newArr[idx] = data.payload;
+               return newArr;
+             }
+             return prev;
+           });
+        }
+        if (data.type === 'DISCOVERY_UPDATE') setDiscoveredMarkets(data.payload);
+        if (data.type === 'RTDS_STATUS') {
+          setRtdsMetrics((prev: any) => ({ ...prev, connected: data.payload.connected }));
+        }
+        if (data.type === 'RTDS_UPDATE') {
+          setRtdsPrice(data.payload.price);
+          setRtdsMetrics((prev: any) => ({
+            ...prev,
+            stale: data.payload.stale,
+            data_age: data.payload.data_age
+          }));
+        }
         if (data.type === 'ORDER_UPDATE') {
           setOrders(prev => {
             const exists = prev.find(o => o.id === data.payload.id);
@@ -48,5 +83,5 @@ export function useWebSocket(url: string) {
     chrome.runtime.sendMessage({ type: 'SEND_WS', payload: msg })?.catch(() => {});
   }, []);
 
-  return { connected, marketInfo, orders, rtdsPrice, sendMessage };
+  return { connected, marketInfo, discoveredMarkets, orders, positions, settings, balance, realizedPnl, rtdsPrice, rtdsMetrics, sendMessage };
 }

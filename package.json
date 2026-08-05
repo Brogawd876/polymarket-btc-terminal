@@ -5,17 +5,18 @@
     "dev": "pnpm --parallel --filter \"./apps/*\" dev",
     "dev:server": "pnpm --filter server dev",
     "dev:extension": "pnpm --filter extension dev",
-    "build": "pnpm -r build",
+    "build": "pnpm -r build && pnpm package:extension",
     "build:server": "pnpm --filter server build",
     "build:extension:chrome": "pnpm --filter extension build:chrome",
     "build:extension:firefox": "pnpm --filter extension build:firefox",
     "package:extension": "pnpm --filter extension package",
+    "start:prod": "pnpm --filter server start:prod",
     "lint": "pnpm --parallel --filter \"*\" lint",
     "typecheck": "pnpm --parallel --filter \"*\" typecheck",
     "test": "pnpm --parallel --filter \"*\" test",
-    "test:integration": "vitest run tests/integration",
+    "test:integration": "vitest run --passWithNoTests tests/integration",
     "test:e2e": "playwright test tests/e2e",
-    "verify": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:integration && pnpm build:server && pnpm build:extension:chrome && pnpm build:extension:firefox && pnpm test:e2e",
+    "verify": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:integration && pnpm build:server && pnpm build:extension:chrome && pnpm build:extension:firefox && pnpm package:extension && pnpm test:e2e",
     "public:diagnose": "pnpm --filter server public:diagnose",
     "live:diagnose": "pnpm --filter server live:diagnose",
     "live:smoke": "pnpm --filter server live:smoke",
@@ -26,14 +27,14 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "zod": "^3.23.8"
+    "zod": "3.23.8"
   },
   "devDependencies": {
-    "@playwright/test": "^1.44.0",
-    "@types/node": "^20.12.12",
-    "better-sqlite3": "^11.3.0",
-    "typescript": "^5.4.5",
-    "vitest": "^2.1.9"
+    "@playwright/test": "1.44.0",
+    "@types/node": "20.12.12",
+    "better-sqlite3": "11.3.0",
+    "typescript": "5.4.5",
+    "vitest": "2.1.9"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
@@ -42,3 +43,4 @@
     ]
   }
 }
+

@@ -80,6 +80,18 @@ export function setupDb() {
       name TEXT NOT NULL,
       config TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS paper_balance (
+      id TEXT PRIMARY KEY,
+      balance TEXT NOT NULL,
+      updatedAt INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS idempotency (
+      requestId TEXT PRIMARY KEY,
+      response TEXT NOT NULL,
+      createdAt INTEGER NOT NULL
+    );
     CREATE INDEX IF NOT EXISTS idx_orders_tokenId ON orders(tokenId);
     CREATE INDEX IF NOT EXISTS idx_fills_orderId ON fills(orderId);
   `);

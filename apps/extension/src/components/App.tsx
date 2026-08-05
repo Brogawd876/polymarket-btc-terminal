@@ -7,7 +7,7 @@ import SettingsTab from './SettingsTab';
 import { Maximize2, Minimize2 } from 'lucide-react';
 
 const App: React.FC = () => {
-  const { connected, marketInfo, orders, rtdsPrice, sendMessage } = useWebSocket('ws://localhost:3001/ws');
+  const { connected, marketInfo, orders, rtdsPrice, sendMessage, balance, realizedPnl, positions } = useWebSocket('ws://localhost:3001/ws');
   const [expanded, setExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<'trade' | 'orders' | 'positions' | 'settings' | 'diag'>('trade');
 
@@ -46,7 +46,7 @@ const App: React.FC = () => {
       <div className="flex-1 overflow-y-auto p-4 bg-gray-900">
         {activeTab === 'trade' && <TradingPanel marketInfo={marketInfo} sendMessage={sendMessage} orders={orders} />}
         {activeTab === 'orders' && <OrdersTab orders={orders} />}
-        {activeTab === 'positions' && <PositionsTab />}
+        {activeTab === 'positions' && <PositionsTab positions={positions} balance={balance} realizedPnl={realizedPnl} marketInfo={marketInfo} />}
         {activeTab === 'settings' && <SettingsTab />}
         {activeTab === 'diag' && (
            <div className="text-xs font-mono">

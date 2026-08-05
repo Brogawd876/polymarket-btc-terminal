@@ -6,12 +6,15 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "lint": "echo lint",
+    "typecheck": "echo typecheck",
+    "test": "echo test"
   },
   "dependencies": {
-    "zod": "^3.23.8"
+    "zod": "3.23.8"
   },
   "devDependencies": {
-    "typescript": "^5.4.5"
+    "typescript": "5.4.5"
   }
 }

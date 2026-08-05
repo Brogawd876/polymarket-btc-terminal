@@ -22,7 +22,16 @@ test.describe('Polymarket Extension Execution Panel', () => {
 
   test('should inject the Shadow DOM execution panel into the target page', async () => {
     const page = await browserContext.newPage();
-    await page.goto('https://polymarket.com');
+    await page.route('**/*', (route) => {
+      // Abort external resources to speed up loading
+      const type = route.request().resourceType();
+      if (['image', 'font', 'stylesheet', 'media'].includes(type)) {
+        route.abort();
+      } else {
+        route.continue();
+      }
+    });
+    await page.goto('https://polymarket.com', { waitUntil: 'domcontentloaded', timeout: 60000 });
     
     // Check if the host element is injected
     const host = page.locator('polymarket-btc-terminal');

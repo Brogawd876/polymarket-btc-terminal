@@ -1,16 +1,21 @@
 import React, { useState } from 'react';
 import type { Order } from '@polymarket-btc/shared';
 
-const OrdersTab: React.FC<{orders: Order[]}> = ({ orders }) => {
+const OrdersTab: React.FC<{orders: Order[], sendMessage: (msg: any) => void}> = ({ orders, sendMessage }) => {
   const [cancelling, setCancelling] = useState<string | null>(null);
 
   const handleCancel = async (id: string) => {
     setCancelling(id);
     try {
-      await fetch(`http://localhost:3001/api/orders/${id}`, { method: 'DELETE' });
+      sendMessage({
+        type: 'CANCEL_ORDER',
+        id: crypto.randomUUID(),
+        payload: { orderId: id }
+      });
+      // Set a timeout to clear the cancelling state if we don't get a response
+      setTimeout(() => setCancelling(null), 2000);
     } catch (e) {
       console.error(e);
-    } finally {
       setCancelling(null);
     }
   };

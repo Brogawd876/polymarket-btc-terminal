@@ -1,25 +1,24 @@
 import React, { useState, useEffect } from 'react';
 
-const SettingsTab: React.FC = () => {
-  const [maxLoss, setMaxLoss] = useState('10');
-  const [maxProfit, setMaxProfit] = useState('150');
+const SettingsTab: React.FC<{ settings: any }> = ({ settings }) => {
+  const [maxLoss, setMaxLoss] = useState(settings?.maxLoss || '10');
+  const [maxProfit, setMaxProfit] = useState(settings?.maxProfit || '150');
 
   useEffect(() => {
-    fetch('http://localhost:3001/api/settings')
-      .then(res => res.json())
-      .then(data => {
-        if (data.maxLoss) setMaxLoss(data.maxLoss);
-        if (data.maxProfit) setMaxProfit(data.maxProfit);
-      })
-      .catch(console.error);
-  }, []);
+    if (settings) {
+      setMaxLoss(settings.maxLoss);
+      setMaxProfit(settings.maxProfit);
+    }
+  }, [settings]);
 
   const handleSave = async () => {
     try {
-      await fetch('http://localhost:3001/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ maxLoss, maxProfit })
+      chrome.runtime.sendMessage({
+        type: 'SEND_WS',
+        payload: {
+          type: 'UPDATE_SETTINGS',
+          payload: { maxLoss, maxProfit }
+        }
       });
       alert('Settings saved');
     } catch (e) {
