@@ -1,7 +1,7 @@
 import { Order, MarketState, Side, OrderStatus } from '@polymarket-btc/shared';
 import { ethers } from 'ethers';
 
-import { ClobClient, Side as ClobSide, OrderType } from '@polymarket/clob-client-v2';
+import { AssetType, ClobClient, Side as ClobSide, OrderType } from '@polymarket/clob-client-v2';
 
 const PRIVATE_KEY = process.env.PRIVATE_KEY || '';
 const POLYMARKET_API_KEY = process.env.POLYMARKET_API_KEY || process.env.BUILDER_KEY || '';
@@ -499,16 +499,34 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
   async getBalance(): Promise<number> {
     if (!this.wallet) return 0;
     try {
+      const balanceAllowance = await this.clobClient.getBalanceAllowance({
+        asset_type: AssetType.COLLATERAL
+      });
+      const clobBalance = this.parseCollateralBalance(balanceAllowance.balance);
+      if (clobBalance > 0) return clobBalance;
+    } catch (e) {
+      console.error('Failed to fetch CLOB balance', e);
+    }
+
+    try {
       // Polygon USDC.e contract
       const usdcAddress = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
       const rpcUrl = process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org';
       const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
       const contract = new ethers.Contract(usdcAddress, ['function balanceOf(address) view returns (uint256)'], provider);
-      const bal = await contract.balanceOf(this.wallet.address);
+      const balanceAddress = POLY_FUNDER_ADDRESS || this.wallet.address;
+      const bal = await contract.balanceOf(balanceAddress);
       return parseFloat(ethers.utils.formatUnits(bal, 6));
     } catch (e) {
       console.error('Failed to fetch balance', e);
       return 0;
     }
+  }
+
+  private parseCollateralBalance(balance: string): number {
+    const parsed = parseFloat(balance);
+    if (!Number.isFinite(parsed)) return 0;
+
+    return parsed > 100000 ? parsed / 1_000_000 : parsed;
   }
 }
