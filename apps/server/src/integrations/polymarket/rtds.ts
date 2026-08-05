@@ -3,6 +3,7 @@ import { FastifyInstance } from 'fastify';
 
 let rtdsWs: WebSocket | null = null;
 const subscribedTokenIds = new Set<string>();
+let heartbeatInterval: NodeJS.Timeout | null = null;
 
 export const rtdsMetrics = {
   connected: false,
@@ -36,6 +37,7 @@ export function startRtds(app: FastifyInstance) {
   ws.on('open', () => {
     console.log('Connected to Polymarket Chainlink RTDS channel');
     rtdsMetrics.connected = true;
+    startHeartbeat(ws);
     
     app.websocketServer.clients.forEach(client => {
       if (client.readyState === WebSocket.OPEN) {
@@ -43,11 +45,15 @@ export function startRtds(app: FastifyInstance) {
       }
     });
 
-    // Send subscribe message (best effort for Polymarket)
     ws.send(JSON.stringify({
-      type: 'subscribe',
-      topic: 'crypto_prices_chainlink',
-      symbols: ['BTC/USD']
+      action: 'subscribe',
+      subscriptions: [
+        {
+          topic: 'crypto_prices_chainlink',
+          type: '*',
+          filters: JSON.stringify({ symbol: 'btc/usd' })
+        }
+      ]
     }));
   });
 
@@ -59,15 +65,14 @@ export function startRtds(app: FastifyInstance) {
       let updated = false;
       
       for (const msg of msgList) {
-        // Handle various payload structures gracefully
-        const priceStr = msg?.price || msg?.current_price;
+        const priceStr = getPriceValue(msg);
         if (priceStr !== undefined) {
-          const price = parseFloat(priceStr);
+          const price = parseFloat(String(priceStr));
           if (!isNaN(price)) {
             const previousValue = rtdsMetrics.current_value;
             rtdsMetrics.current_value = price;
             rtdsMetrics.receive_timestamp = Date.now();
-            rtdsMetrics.source_timestamp = msg.timestamp || rtdsMetrics.receive_timestamp;
+            rtdsMetrics.source_timestamp = getSourceTimestamp(msg) || rtdsMetrics.receive_timestamp;
             rtdsMetrics.price_to_beat = previousValue > 0 ? previousValue : price;
             rtdsMetrics.difference = price - rtdsMetrics.price_to_beat;
             if (price > rtdsMetrics.price_to_beat) rtdsMetrics.leading_direction = 'UP';
@@ -106,6 +111,7 @@ export function startRtds(app: FastifyInstance) {
   ws.on('close', () => {
     rtdsWs = null;
     rtdsMetrics.connected = false;
+    stopHeartbeat();
     console.log('RTDS WebSocket closed, reconnecting in 5s...');
     
     app.websocketServer.clients.forEach(client => {
@@ -120,4 +126,43 @@ export function startRtds(app: FastifyInstance) {
   ws.on('error', (err) => {
     console.error('RTDS WebSocket error', err);
   });
+}
+
+function startHeartbeat(ws: WebSocket): void {
+  stopHeartbeat();
+  heartbeatInterval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send('PING');
+    }
+  }, 5000);
+}
+
+function stopHeartbeat(): void {
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+    heartbeatInterval = null;
+  }
+}
+
+function getPriceValue(msg: any): string | number | undefined {
+  return msg?.payload?.value
+    ?? msg?.payload?.price
+    ?? msg?.payload?.current_price
+    ?? msg?.value
+    ?? msg?.price
+    ?? msg?.current_price;
+}
+
+function getSourceTimestamp(msg: any): number | undefined {
+  const timestamp = msg?.payload?.timestamp ?? msg?.timestamp;
+  if (typeof timestamp === 'number') return timestamp;
+  if (typeof timestamp === 'string') {
+    const numeric = Number(timestamp);
+    if (Number.isFinite(numeric)) return numeric;
+
+    const parsed = new Date(timestamp).getTime();
+    if (Number.isFinite(parsed)) return parsed;
+  }
+
+  return undefined;
 }
