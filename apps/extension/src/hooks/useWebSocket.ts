@@ -62,6 +62,7 @@ export function useWebSocket(url: string) {
           setRtdsPrice(data.payload.price);
           setRtdsMetrics((prev: any) => ({
             ...prev,
+            connected: true,
             stale: data.payload.stale,
             data_age: data.payload.data_age
           }));

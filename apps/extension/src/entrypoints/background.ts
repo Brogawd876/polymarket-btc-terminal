@@ -15,6 +15,8 @@ export default defineBackground(() => {
     settings: { maxLoss: '10', maxProfit: '150' }
   };
   let latestDiscovery: any[] = [];
+  let latestRtdsStatus: { connected: boolean } | null = null;
+  let latestRtdsUpdate: any | null = null;
 
   function startKeepAlive() {
     if (pingInterval) clearInterval(pingInterval);
@@ -45,6 +47,12 @@ export default defineBackground(() => {
         port.postMessage({ type: 'WS_EVENT', payload: { type: 'SNAPSHOT', payload: snapshotState } });
         if (latestDiscovery.length > 0) {
           port.postMessage({ type: 'WS_EVENT', payload: { type: 'DISCOVERY_UPDATE', payload: latestDiscovery } });
+        }
+        if (latestRtdsStatus) {
+          port.postMessage({ type: 'WS_EVENT', payload: { type: 'RTDS_STATUS', payload: latestRtdsStatus } });
+        }
+        if (latestRtdsUpdate) {
+          port.postMessage({ type: 'WS_EVENT', payload: { type: 'RTDS_UPDATE', payload: latestRtdsUpdate } });
         }
       }
     }
@@ -112,6 +120,13 @@ export default defineBackground(() => {
             }
           } else if (data.type === 'DISCOVERY_UPDATE') {
             latestDiscovery = data.payload as any[];
+            broadcast({ type: 'WS_EVENT', payload: data });
+          } else if (data.type === 'RTDS_STATUS') {
+            latestRtdsStatus = data.payload as { connected: boolean };
+            broadcast({ type: 'WS_EVENT', payload: data });
+          } else if (data.type === 'RTDS_UPDATE') {
+            latestRtdsUpdate = data.payload;
+            latestRtdsStatus = { connected: true };
             broadcast({ type: 'WS_EVENT', payload: data });
           } else {
             broadcast({ type: 'WS_EVENT', payload: data });
