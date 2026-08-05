@@ -162,7 +162,7 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
       }
       if (allTokens.length > 0) {
         this.wsMarket?.send(JSON.stringify({
-          assets: allTokens,
+          assets_ids: allTokens,
           type: "market"
         }));
       }
@@ -170,7 +170,13 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
     
     this.wsMarket.on('message', (data) => {
       try {
-        const msg = JSON.parse(data.toString());
+        const raw = data.toString();
+        if (!raw.trim().startsWith('{') && !raw.trim().startsWith('[')) {
+          console.warn(`Ignoring non-JSON WS Market msg: ${raw}`);
+          return;
+        }
+
+        const msg = JSON.parse(raw);
         if (Array.isArray(msg)) {
           for (const item of msg) this.handleMarketMessage(item);
         } else {
@@ -206,7 +212,9 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
   }
 
   private handleMarketMessage(msg: any) {
-    if (msg.event === 'market' || msg.event === 'book') {
+    const eventType = msg.event_type || msg.event;
+
+    if (eventType === 'market' || eventType === 'book') {
       const assetId = msg.asset_id;
       if (!assetId) return;
       
@@ -226,17 +234,36 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
       }
 
       this.updateMarketStateFromOrderbooks(conditionId);
-    } else if (msg.event === 'price_change') {
+    } else if (eventType === 'price_change') {
+      const changes = Array.isArray(msg.price_changes) ? msg.price_changes : [msg];
+      const changedConditions = new Set<string>();
+
+      for (const change of changes) {
+        const assetId = change.asset_id;
+        if (!assetId) continue;
+        const conditionId = this.tokenToCondition.get(assetId);
+        if (!conditionId) continue;
+
+        const ob = this.orderbooks.get(assetId) || { bids: [], asks: [] };
+        if (change.bids && Array.isArray(change.bids)) ob.bids = change.bids;
+        if (change.asks && Array.isArray(change.asks)) ob.asks = change.asks;
+        if (change.best_bid) ob.bids = [{ price: change.best_bid, size: change.size || '0' }, ...ob.bids.slice(1)];
+        if (change.best_ask) ob.asks = [{ price: change.best_ask, size: change.size || '0' }, ...ob.asks.slice(1)];
+        this.orderbooks.set(assetId, ob);
+        changedConditions.add(conditionId);
+      }
+
+      for (const conditionId of changedConditions) this.updateMarketStateFromOrderbooks(conditionId);
+    } else if (eventType === 'best_bid_ask') {
       const assetId = msg.asset_id;
       if (!assetId) return;
       const conditionId = this.tokenToCondition.get(assetId);
       if (!conditionId) return;
-      
+
       const ob = this.orderbooks.get(assetId) || { bids: [], asks: [] };
-      if (msg.bids && Array.isArray(msg.bids)) ob.bids = msg.bids;
-      if (msg.asks && Array.isArray(msg.asks)) ob.asks = msg.asks;
+      if (msg.best_bid) ob.bids = [{ price: msg.best_bid, size: '0' }, ...ob.bids.slice(1)];
+      if (msg.best_ask) ob.asks = [{ price: msg.best_ask, size: '0' }, ...ob.asks.slice(1)];
       this.orderbooks.set(assetId, ob);
-      
       this.updateMarketStateFromOrderbooks(conditionId);
     }
   }
@@ -358,8 +385,8 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
       
       if (this.wsMarket?.readyState === WebSocket.OPEN) {
          this.wsMarket.send(JSON.stringify({
-            assets: [yesTokenId, noTokenId],
-            type: "market"
+            operation: "subscribe",
+            assets_ids: [yesTokenId, noTokenId],
          }));
       }
     }
@@ -474,7 +501,8 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
     try {
       // Polygon USDC.e contract
       const usdcAddress = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
-      const provider = new ethers.providers.JsonRpcProvider('https://polygon-rpc.com');
+      const rpcUrl = process.env.POLYGON_RPC_URL || 'https://polygon.drpc.org';
+      const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
       const contract = new ethers.Contract(usdcAddress, ['function balanceOf(address) view returns (uint256)'], provider);
       const bal = await contract.balanceOf(this.wallet.address);
       return parseFloat(ethers.utils.formatUnits(bal, 6));

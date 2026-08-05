@@ -14,6 +14,7 @@ export default defineBackground(() => {
     balance: 0,
     settings: { maxLoss: '10', maxProfit: '150' }
   };
+  let latestDiscovery: any[] = [];
 
   function startKeepAlive() {
     if (pingInterval) clearInterval(pingInterval);
@@ -42,6 +43,9 @@ export default defineBackground(() => {
       port.postMessage({ type: 'WS_STATUS', payload: isAuthenticated });
       if (isAuthenticated) {
         port.postMessage({ type: 'WS_EVENT', payload: { type: 'SNAPSHOT', payload: snapshotState } });
+        if (latestDiscovery.length > 0) {
+          port.postMessage({ type: 'WS_EVENT', payload: { type: 'DISCOVERY_UPDATE', payload: latestDiscovery } });
+        }
       }
     }
   });
@@ -106,6 +110,9 @@ export default defineBackground(() => {
             while(messageQueue.length > 0) {
               ws?.send(JSON.stringify(messageQueue.shift()));
             }
+          } else if (data.type === 'DISCOVERY_UPDATE') {
+            latestDiscovery = data.payload as any[];
+            broadcast({ type: 'WS_EVENT', payload: data });
           } else {
             broadcast({ type: 'WS_EVENT', payload: data });
           }

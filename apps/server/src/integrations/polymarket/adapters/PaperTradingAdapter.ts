@@ -78,7 +78,7 @@ export class PaperTradingAdapter extends TradingAdapter {
       }
       if (allTokens.length > 0) {
         this.wsMarket?.send(JSON.stringify({
-          assets: allTokens,
+          assets_ids: allTokens,
           type: "market"
         }));
       }
@@ -116,7 +116,9 @@ export class PaperTradingAdapter extends TradingAdapter {
   }
 
   private handleMarketMessage(msg: any) {
-    if (msg.event === 'market' || msg.event === 'book') {
+    const eventType = msg.event_type || msg.event;
+
+    if (eventType === 'market' || eventType === 'book') {
       const assetId = msg.asset_id;
       if (!assetId) return;
       
@@ -137,17 +139,39 @@ export class PaperTradingAdapter extends TradingAdapter {
 
       this.updateMarketStateFromOrderbooks(conditionId);
       this.matchOrders(assetId);
-    } else if (msg.event === 'price_change') {
+    } else if (eventType === 'price_change') {
+      const changes = Array.isArray(msg.price_changes) ? msg.price_changes : [msg];
+      const changedAssets = new Set<string>();
+      const changedConditions = new Set<string>();
+
+      for (const change of changes) {
+        const assetId = change.asset_id;
+        if (!assetId) continue;
+        const conditionId = this.tokenToCondition.get(assetId);
+        if (!conditionId) continue;
+
+        const ob = this.orderbooks.get(assetId) || { bids: [], asks: [] };
+        if (change.bids && Array.isArray(change.bids)) ob.bids = change.bids;
+        if (change.asks && Array.isArray(change.asks)) ob.asks = change.asks;
+        if (change.best_bid) ob.bids = [{ price: change.best_bid, size: change.size || '0' }, ...ob.bids.slice(1)];
+        if (change.best_ask) ob.asks = [{ price: change.best_ask, size: change.size || '0' }, ...ob.asks.slice(1)];
+        this.orderbooks.set(assetId, ob);
+        changedAssets.add(assetId);
+        changedConditions.add(conditionId);
+      }
+
+      for (const conditionId of changedConditions) this.updateMarketStateFromOrderbooks(conditionId);
+      for (const assetId of changedAssets) this.matchOrders(assetId);
+    } else if (eventType === 'best_bid_ask') {
       const assetId = msg.asset_id;
       if (!assetId) return;
       const conditionId = this.tokenToCondition.get(assetId);
       if (!conditionId) return;
-      
+
       const ob = this.orderbooks.get(assetId) || { bids: [], asks: [] };
-      if (msg.bids && Array.isArray(msg.bids)) ob.bids = msg.bids;
-      if (msg.asks && Array.isArray(msg.asks)) ob.asks = msg.asks;
+      if (msg.best_bid) ob.bids = [{ price: msg.best_bid, size: '0' }, ...ob.bids.slice(1)];
+      if (msg.best_ask) ob.asks = [{ price: msg.best_ask, size: '0' }, ...ob.asks.slice(1)];
       this.orderbooks.set(assetId, ob);
-      
       this.updateMarketStateFromOrderbooks(conditionId);
       this.matchOrders(assetId);
     }
@@ -385,8 +409,8 @@ export class PaperTradingAdapter extends TradingAdapter {
       
       if (this.wsMarket?.readyState === WebSocket.OPEN) {
          this.wsMarket.send(JSON.stringify({
-            assets: [yesTokenId, noTokenId],
-            type: "market"
+            operation: "subscribe",
+            assets_ids: [yesTokenId, noTokenId],
          }));
       }
     }

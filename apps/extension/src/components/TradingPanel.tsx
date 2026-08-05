@@ -8,14 +8,14 @@ interface Props {
   sendMessage: (msg: any) => void;
   orders?: Order[];
   rtdsMetrics?: any;
+  balance?: number;
 }
 
-const TradingPanel: React.FC<Props> = ({ marketInfo, discoveredMarkets = [], sendMessage, orders = [], rtdsMetrics }) => {
+const TradingPanel: React.FC<Props> = ({ marketInfo, discoveredMarkets = [], sendMessage, orders = [], rtdsMetrics, balance = 0 }) => {
   const [size, setSize] = useState('100');
   const [price, setPrice] = useState('0.50');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
-  const [balance, setBalance] = useState<number>(0);
   const [dataAge, setDataAge] = useState<number>(0);
   const [countdown, setCountdown] = useState<string>('');
   const [presets, setPresets] = useState<PresetConfig[]>([]);
@@ -26,15 +26,6 @@ const TradingPanel: React.FC<Props> = ({ marketInfo, discoveredMarkets = [], sen
       .then(r => r.json())
       .then(data => setPresets(data))
       .catch(console.error);
-  }, []);
-
-  useEffect(() => {
-    chrome.runtime.sendMessage({ type: 'GET_BALANCE' }, (response) => {
-      if (chrome.runtime.lastError) return;
-      if (response?.balance !== undefined) {
-        setBalance(response.balance);
-      }
-    });
   }, []);
 
   useEffect(() => {
@@ -58,6 +49,21 @@ const TradingPanel: React.FC<Props> = ({ marketInfo, discoveredMarkets = [], sen
   useEffect(() => {
     setIsSubmitting(false);
   }, [orders]);
+
+  useEffect(() => {
+    const currentMarket = discoveredMarkets.find(m => m.type === 'CURRENT');
+    if (!currentMarket) return;
+    if (marketInfo?.marketId === currentMarket.marketId && Date.now() < (marketInfo.targetTime || 0)) return;
+
+    sendMessage({
+      type: 'SUBSCRIBE_MARKET',
+      payload: {
+        conditionId: currentMarket.conditionId,
+        yesTokenId: currentMarket.yesTokenId,
+        noTokenId: currentMarket.noTokenId
+      }
+    });
+  }, [discoveredMarkets, marketInfo?.marketId, marketInfo?.targetTime, sendMessage]);
 
   useEffect(() => {
     const listener = (message: any) => {

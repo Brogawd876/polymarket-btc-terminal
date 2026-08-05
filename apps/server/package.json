@@ -5,7 +5,7 @@
   "scripts": {
     "build": "pnpm run bundle && node scripts/copy-assets.js",
     "start": "node dist/index.js",
-    "start:prod": "node dist/bundle.js",
+    "start:prod": "node -r dotenv/config dist/bundle.js",
     "dev": "ts-node-dev src/index.ts",
     "bundle": "esbuild src/index.ts --bundle --platform=node --target=node18 --outfile=dist/bundle.js --external:better-sqlite3 --external:*.node",
     "lint": "echo lint",

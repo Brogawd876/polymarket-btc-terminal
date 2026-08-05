@@ -7,12 +7,12 @@ import SettingsTab from './SettingsTab';
 import { Maximize2, Minimize2 } from 'lucide-react';
 
 const App: React.FC = () => {
-  const { connected, marketInfo, orders, rtdsPrice, sendMessage, balance, realizedPnl, positions } = useWebSocket('ws://localhost:3001/ws');
+  const { connected, marketInfo, discoveredMarkets, orders, rtdsPrice, rtdsMetrics, sendMessage, balance, realizedPnl, positions } = useWebSocket('ws://localhost:3001/ws');
   const [expanded, setExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<'trade' | 'orders' | 'positions' | 'settings' | 'diag'>('trade');
 
   return (
-    <div className={`fixed bottom-4 right-4 bg-gray-900 text-white rounded-lg shadow-2xl overflow-hidden flex flex-col transition-all duration-300 ${expanded ? 'w-[600px] h-[800px]' : 'w-[320px] h-[500px]'}`}>
+    <div style={{ pointerEvents: 'auto' }} className={`fixed bottom-4 right-4 bg-gray-900 text-white rounded-lg shadow-2xl overflow-hidden flex flex-col transition-all duration-300 ${expanded ? 'w-[600px] h-[800px]' : 'w-[320px] h-[500px]'}`}>
       {/* Header */}
       <div className="flex items-center justify-between p-3 bg-gray-800 border-b border-gray-700">
         <div className="flex items-center gap-2">
@@ -44,7 +44,16 @@ const App: React.FC = () => {
 
       {/* Content area */}
       <div className="flex-1 overflow-y-auto p-4 bg-gray-900">
-        {activeTab === 'trade' && <TradingPanel marketInfo={marketInfo} sendMessage={sendMessage} orders={orders} />}
+        {activeTab === 'trade' && (
+          <TradingPanel
+            marketInfo={marketInfo}
+            discoveredMarkets={discoveredMarkets}
+            sendMessage={sendMessage}
+            orders={orders}
+            rtdsMetrics={rtdsMetrics}
+            balance={balance}
+          />
+        )}
         {activeTab === 'orders' && <OrdersTab orders={orders} />}
         {activeTab === 'positions' && <PositionsTab positions={positions} balance={balance} realizedPnl={realizedPnl} marketInfo={marketInfo} />}
         {activeTab === 'settings' && <SettingsTab />}

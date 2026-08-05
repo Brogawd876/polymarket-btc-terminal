@@ -217,6 +217,18 @@ export async function registerRoutes(app: FastifyInstance) {
               }
             }
           }));
+
+          // Send immediate discovery update
+          const globalDiscoveryService = (globalThis as typeof globalThis & {
+            discoveryService?: { getMarkets: () => unknown };
+          }).discoveryService;
+          if (globalDiscoveryService) {
+             connection.socket.send(JSON.stringify({
+               type: 'DISCOVERY_UPDATE',
+               payload: globalDiscoveryService.getMarkets()
+              }));
+          }
+
           return;
         }
 
