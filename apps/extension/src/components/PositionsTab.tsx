@@ -1,88 +1,80 @@
 import React from 'react';
-import type { MarketState } from '@polymarket-btc/shared';
+import type { Position, MarketState } from '@polymarket-btc/shared';
 
 interface Props {
-  positions: any[];
+  positions: Position[];
   balance: number;
   realizedPnl: number;
   marketInfo: MarketState | null;
 }
 
-const PositionsTab: React.FC<Props> = ({ positions, balance, realizedPnl, marketInfo }) => {
-  const calculateUnrealizedPnl = () => {
-    if (!marketInfo) return 0;
-    let upnl = 0;
-    positions.forEach(p => {
-      // Find the current market price for this asset
-      let currentPrice = 0;
-      if (p.asset === marketInfo.yesTokenId) currentPrice = parseFloat(marketInfo.yesPrice || '0');
-      else if (p.asset === marketInfo.noTokenId) currentPrice = parseFloat(marketInfo.noPrice || '0');
-      
-      if (currentPrice > 0) {
-        if (p.side === 'BUY') {
-          upnl += (currentPrice - parseFloat(p.entry)) * parseFloat(p.size);
-        } else if (p.side === 'SELL') {
-          upnl += (parseFloat(p.entry) - currentPrice) * parseFloat(p.size);
-        }
-      }
-    });
-    return upnl;
-  };
-
-  const unrealizedPnl = calculateUnrealizedPnl();
-  const totalPnl = realizedPnl + unrealizedPnl;
+const PositionsTab: React.FC<Props> = ({ positions = [], balance = 0, realizedPnl = 0, marketInfo }) => {
+  const activePositions = positions.filter(p => parseFloat(p.netSize || p.netShares || '0') > 0);
 
   return (
-    <div className="flex flex-col gap-4 text-xs">
-      <div className="grid grid-cols-3 gap-2 bg-gray-800 p-3 rounded text-center">
+    <div className="flex flex-col gap-3 text-xs font-sans">
+      <div className="bg-gray-800 p-2.5 rounded border border-gray-700 grid grid-cols-2 gap-2 font-mono">
         <div>
-          <div className="text-gray-400">Balance</div>
-          <div className="font-bold font-mono">${balance.toFixed(2)}</div>
+          <span className="text-gray-400 text-[10px] block">COLLATERAL BAL</span>
+          <span className="text-sm font-bold text-white">${balance.toFixed(2)}</span>
         </div>
-        <div>
-          <div className="text-gray-400">Unrealized P&L</div>
-          <div className={`font-bold font-mono ${unrealizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-            {unrealizedPnl >= 0 ? '+' : ''}{unrealizedPnl.toFixed(2)}
-          </div>
-        </div>
-        <div>
-          <div className="text-gray-400">Realized P&L</div>
-          <div className={`font-bold font-mono ${realizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-            {realizedPnl >= 0 ? '+' : ''}{realizedPnl.toFixed(2)}
-          </div>
+        <div className="text-right">
+          <span className="text-gray-400 text-[10px] block">REALIZED P&L</span>
+          <span className={`text-sm font-bold ${realizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+            {realizedPnl >= 0 ? `+$${realizedPnl.toFixed(2)}` : `-$${Math.abs(realizedPnl).toFixed(2)}`}
+          </span>
         </div>
       </div>
 
-      <div className="flex flex-col gap-2">
-        <h3 className="font-bold border-b border-gray-700 pb-1">Positions</h3>
-        {positions.length === 0 ? (
-          <div className="text-gray-500">No open positions</div>
-        ) : (
-          <table className="w-full text-left">
-            <thead>
-              <tr className="text-gray-400">
-                <th className="font-normal">Asset</th>
-                <th className="font-normal">Side</th>
-                <th className="font-normal text-right">Size</th>
-                <th className="font-normal text-right">Avg Entry</th>
-              </tr>
-            </thead>
-            <tbody>
-              {positions.map((p, i) => (
-                <tr key={i} className="border-t border-gray-800">
-                  <td className="py-2">
-                    {marketInfo?.yesTokenId === p.asset ? 'YES' : marketInfo?.noTokenId === p.asset ? 'NO' : (p.asset.substring(0,6) || 'Unknown')}
-                  </td>
-                  <td className={`py-2 font-bold ${p.side === 'BUY' ? 'text-green-400' : 'text-red-400'}`}>{p.side}</td>
-                  <td className="py-2 text-right">{parseFloat(p.size).toFixed(2)}</td>
-                  <td className="py-2 text-right">${parseFloat(p.entry).toFixed(2)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+      <div className="font-bold text-gray-200 uppercase tracking-wider px-1">POSITIONS ({activePositions.length})</div>
+
+      {activePositions.length === 0 ? (
+        <div className="text-center text-gray-500 py-8">No open positions</div>
+      ) : (
+        <div className="flex flex-col gap-2 font-mono">
+          {activePositions.map(pos => {
+            const isUp = marketInfo && (pos.tokenId === marketInfo.upTokenId || pos.tokenId === marketInfo.yesTokenId);
+            const isDown = marketInfo && (pos.tokenId === marketInfo.downTokenId || pos.tokenId === marketInfo.noTokenId);
+            const outcomeText = isUp ? 'UP' : isDown ? 'DOWN' : (pos.outcome || 'SHARES');
+
+            const currentBidStr = isUp 
+              ? (marketInfo?.upBid || marketInfo?.yesBid) 
+              : isDown ? (marketInfo?.downBid || marketInfo?.noBid) : undefined;
+            const currentBid = parseFloat(currentBidStr || '0');
+
+            const netShares = parseFloat(pos.netSize || pos.netShares || '0');
+            const avgEntry = parseFloat(pos.avgPrice || pos.averageEntry || '0');
+            const costBasis = netShares * avgEntry;
+            const estLiqVal = currentBid > 0 ? netShares * currentBid : costBasis;
+            const unrealized = currentBid > 0 ? (estLiqVal - costBasis) : 0;
+
+            return (
+              <div key={pos.tokenId} className="bg-gray-800 p-2.5 rounded border border-gray-700 flex flex-col gap-1.5">
+                <div className="flex justify-between items-center">
+                  <div className="flex items-center gap-1.5">
+                    <span className={`px-1.5 py-0.5 rounded font-bold text-[10px] ${isUp ? 'bg-green-950 text-green-400 border border-green-800' : 'bg-red-950 text-red-400 border border-red-800'}`}>
+                      {outcomeText}
+                    </span>
+                    <span className="text-white font-bold">{netShares.toFixed(1)} SHARES</span>
+                  </div>
+                  <span className="text-[10px] text-gray-400">AVG: @${avgEntry.toFixed(2)}</span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-1 text-[10px] pt-1.5 border-t border-gray-700/60 text-gray-300">
+                  <div>COST BASIS: ${costBasis.toFixed(2)}</div>
+                  <div className="text-right">EST LIQ: ${estLiqVal.toFixed(2)}</div>
+                  <div>FEES: ${parseFloat(pos.fees || '0').toFixed(2)}</div>
+                  <div className={`text-right font-bold ${unrealized >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    UNREALIZED: {unrealized >= 0 ? `+$${unrealized.toFixed(2)}` : `-$${Math.abs(unrealized).toFixed(2)}`}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 };
+
 export default PositionsTab;

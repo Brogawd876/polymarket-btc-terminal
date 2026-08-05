@@ -1,32 +1,86 @@
 import WebSocket from 'ws';
 import { FastifyInstance } from 'fastify';
+import { MarketAnchor } from '@polymarket-btc/shared';
 
 let rtdsWs: WebSocket | null = null;
-const subscribedTokenIds = new Set<string>();
 let heartbeatInterval: NodeJS.Timeout | null = null;
 
 export const rtdsMetrics = {
   connected: false,
-  source_timestamp: 0,
-  receive_timestamp: 0,
-  current_value: 0,
-  price_to_beat: 0,
-  difference: 0,
-  leading_direction: 'NONE' as 'UP' | 'DOWN' | 'NONE'
+  currentPrice: 0,
+  sourceTimestamp: 0,
+  receiveTimestamp: 0,
+  stale: true,
+  dataAgeMs: 0,
 };
+
+const marketAnchors = new Map<string, MarketAnchor>();
+let activeConditionId: string | null = null;
 
 export function isRtdsStale(): boolean {
   if (!rtdsMetrics.connected) return true;
-  if (rtdsMetrics.receive_timestamp === 0) return true; // never received
-  const age = Date.now() - rtdsMetrics.receive_timestamp;
-  return age > 5000; // 5 seconds threshold
+  if (rtdsMetrics.receiveTimestamp === 0) return true;
+  const age = Date.now() - rtdsMetrics.receiveTimestamp;
+  return age > 5000;
 }
 
-// Keep export for API compatibility but do nothing for Chainlink
-export function addRtdsSubscription(tokenIds: string[]): void {
-  tokenIds.forEach(id => subscribedTokenIds.add(id));
-  // In the real Chainlink stream, we may not need to subscribe by token ID
-  // But let's send a subscribe just in case if connected
+export function setActiveMarketAnchor(conditionId: string, windowStart: number, initialPrice?: string): MarketAnchor {
+  activeConditionId = conditionId;
+  let anchor = marketAnchors.get(conditionId);
+
+  if (!anchor) {
+    const val = initialPrice && parseFloat(initialPrice) > 0 
+      ? initialPrice 
+      : (rtdsMetrics.currentPrice > 0 ? String(rtdsMetrics.currentPrice) : '0');
+
+    anchor = {
+      conditionId,
+      windowStart,
+      value: val,
+      sourceTimestamp: rtdsMetrics.sourceTimestamp || Date.now(),
+      validated: parseFloat(val) > 0
+    };
+    marketAnchors.set(conditionId, anchor);
+  }
+
+  return anchor;
+}
+
+export function getMarketAnchor(conditionId: string): MarketAnchor | undefined {
+  return marketAnchors.get(conditionId);
+}
+
+export function getRtdsMetrics() {
+  const age = rtdsMetrics.receiveTimestamp > 0 ? Date.now() - rtdsMetrics.receiveTimestamp : 999999;
+  const stale = !rtdsMetrics.connected || age > 5000;
+
+  let priceToBeat = '0';
+  let difference = 0;
+  let leadingOutcome: 'UP' | 'DOWN' | undefined = undefined;
+
+  if (activeConditionId) {
+    const anchor = marketAnchors.get(activeConditionId);
+    if (anchor && anchor.validated) {
+      priceToBeat = anchor.value;
+      const beatVal = parseFloat(anchor.value);
+      if (rtdsMetrics.currentPrice > 0 && beatVal > 0) {
+        difference = rtdsMetrics.currentPrice - beatVal;
+        if (difference > 0) leadingOutcome = 'UP';
+        else if (difference < 0) leadingOutcome = 'DOWN';
+      }
+    }
+  }
+
+  return {
+    currentPrice: rtdsMetrics.currentPrice,
+    sourceTimestamp: rtdsMetrics.sourceTimestamp,
+    dataAgeMs: age,
+    connected: rtdsMetrics.connected,
+    stale,
+    priceToBeat,
+    difference,
+    leadingOutcome,
+  };
 }
 
 export function startRtds(app: FastifyInstance) {
@@ -68,33 +122,32 @@ export function startRtds(app: FastifyInstance) {
         const priceStr = getPriceValue(msg);
         if (priceStr !== undefined) {
           const price = parseFloat(String(priceStr));
-          if (!isNaN(price)) {
-            const previousValue = rtdsMetrics.current_value;
-            rtdsMetrics.current_value = price;
-            rtdsMetrics.receive_timestamp = Date.now();
-            rtdsMetrics.source_timestamp = getSourceTimestamp(msg) || rtdsMetrics.receive_timestamp;
-            rtdsMetrics.price_to_beat = previousValue > 0 ? previousValue : price;
-            rtdsMetrics.difference = price - rtdsMetrics.price_to_beat;
-            if (price > rtdsMetrics.price_to_beat) rtdsMetrics.leading_direction = 'UP';
-            else if (price < rtdsMetrics.price_to_beat) rtdsMetrics.leading_direction = 'DOWN';
-            else rtdsMetrics.leading_direction = 'NONE';
-            
+          if (!isNaN(price) && price > 0) {
+            rtdsMetrics.currentPrice = price;
+            rtdsMetrics.receiveTimestamp = Date.now();
+            rtdsMetrics.sourceTimestamp = getSourceTimestamp(msg) || rtdsMetrics.receiveTimestamp;
+            rtdsMetrics.stale = false;
+            rtdsMetrics.dataAgeMs = Date.now() - rtdsMetrics.receiveTimestamp;
+
+            if (activeConditionId) {
+              const anchor = marketAnchors.get(activeConditionId);
+              if (anchor && (!anchor.validated || parseFloat(anchor.value) <= 0)) {
+                anchor.value = String(price);
+                anchor.sourceTimestamp = rtdsMetrics.sourceTimestamp;
+                anchor.validated = true;
+              }
+            }
+
             updated = true;
           }
         }
       }
 
       if (updated) {
-        const dataAge = Date.now() - rtdsMetrics.receive_timestamp;
-        const stale = isRtdsStale();
+        const metrics = getRtdsMetrics();
         const broadcastMsg = JSON.stringify({ 
-          type: 'RTDS_UPDATE', 
-          payload: { 
-            price: rtdsMetrics.current_value,
-            source_timestamp: rtdsMetrics.source_timestamp,
-            data_age: dataAge,
-            stale
-          } 
+          type: 'REFERENCE_UPDATED', 
+          payload: metrics 
         });
         
         app.websocketServer.clients.forEach(client => {
@@ -104,15 +157,16 @@ export function startRtds(app: FastifyInstance) {
         });
       }
     } catch (e) {
-      // ignore parse errors
+      // Ignore parse noise
     }
   });
 
   ws.on('close', () => {
     rtdsWs = null;
     rtdsMetrics.connected = false;
+    rtdsMetrics.stale = true;
     stopHeartbeat();
-    console.log('RTDS WebSocket closed, reconnecting in 5s...');
+    console.log('RTDS WebSocket closed, reconnecting in 3s...');
     
     app.websocketServer.clients.forEach(client => {
       if (client.readyState === WebSocket.OPEN) {
@@ -120,7 +174,7 @@ export function startRtds(app: FastifyInstance) {
       }
     });
 
-    setTimeout(() => startRtds(app), 5000);
+    setTimeout(() => startRtds(app), 3000);
   });
 
   ws.on('error', (err) => {

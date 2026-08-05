@@ -1,47 +1,79 @@
 import React, { useState, useEffect } from 'react';
-import type { MarketState, Side, Order, PresetConfig } from '@polymarket-btc/shared';
-import { Loader2 } from 'lucide-react';
+import type { 
+  MarketState, 
+  Side, 
+  Order, 
+  PresetConfig, 
+  LiveReadiness, 
+  OperationalState, 
+  Position, 
+  Outcome 
+} from '@polymarket-btc/shared';
+import { ShieldCheck, ShieldAlert, AlertTriangle, Play, Square } from 'lucide-react';
 
 interface Props {
+  operationalState: OperationalState;
+  readiness: LiveReadiness | null;
   marketInfo: MarketState | null;
   discoveredMarkets?: MarketState[];
   sendMessage: (msg: any) => void;
   orders?: Order[];
+  positions?: Position[];
+  presets?: PresetConfig[];
   rtdsMetrics?: any;
   balance?: number;
 }
 
-const TradingPanel: React.FC<Props> = ({ marketInfo, discoveredMarkets = [], sendMessage, orders = [], rtdsMetrics, balance = 0 }) => {
-  const [size, setSize] = useState('');
-  const [price, setPrice] = useState('0.50');
+const DEFAULT_PRESETS: PresetConfig[] = [
+  { id: 'buy-1', name: 'Match Ask', side: 'BUY', mode: 'CENT_OFFSET', reference: 'BEST_ASK', value: 0, active: true, clampMode: 'CLAMP' },
+  { id: 'buy-2', name: '1c under ask', side: 'BUY', mode: 'CENT_OFFSET', reference: 'BEST_ASK', value: -0.01, active: true, clampMode: 'CLAMP' },
+  { id: 'buy-3', name: '15% under ask', side: 'BUY', mode: 'PERCENT_OFFSET', reference: 'BEST_ASK', value: -15, active: true, clampMode: 'CLAMP' },
+  { id: 'buy-4', name: '20% under ask', side: 'BUY', mode: 'PERCENT_OFFSET', reference: 'BEST_ASK', value: -20, active: true, clampMode: 'CLAMP' },
+  { id: 'buy-5', name: '50% under ask', side: 'BUY', mode: 'PERCENT_OFFSET', reference: 'BEST_ASK', value: -50, active: true, clampMode: 'CLAMP' },
+
+  { id: 'sell-1', name: 'Match Bid', side: 'SELL', mode: 'CENT_OFFSET', reference: 'BEST_BID', value: 0, active: true, clampMode: 'CLAMP' },
+  { id: 'sell-2', name: '1c over bid', side: 'SELL', mode: 'CENT_OFFSET', reference: 'BEST_BID', value: 0.01, active: true, clampMode: 'CLAMP' },
+  { id: 'sell-3', name: '15% over bid', side: 'SELL', mode: 'PERCENT_OFFSET', reference: 'BEST_BID', value: 15, active: true, clampMode: 'CLAMP' },
+  { id: 'sell-4', name: '20% over bid', side: 'SELL', mode: 'PERCENT_OFFSET', reference: 'BEST_BID', value: 20, active: true, clampMode: 'CLAMP' },
+  { id: 'sell-5', name: '50% over bid', side: 'SELL', mode: 'PERCENT_OFFSET', reference: 'BEST_BID', value: 50, active: true, clampMode: 'CLAMP' },
+];
+
+const TradingPanel: React.FC<Props> = ({ 
+  operationalState,
+  readiness,
+  marketInfo, 
+  discoveredMarkets = [], 
+  sendMessage, 
+  orders = [], 
+  positions = [],
+  presets = DEFAULT_PRESETS, 
+  rtdsMetrics, 
+  balance = 0 
+}) => {
+  const [buyUsdSpend, setBuyUsdSpend] = useState<string>('25');
+  const [sellShares, setSellShares] = useState<string>('');
+  const [activeOutcome, setActiveOutcome] = useState<Outcome>('UP');
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState('');
-  const [dataAge, setDataAge] = useState<number>(0);
+  const [error, setError] = useState<string>('');
   const [countdown, setCountdown] = useState<string>('');
-  const [presets, setPresets] = useState<PresetConfig[]>([]);
-  const [activeSide, setActiveSide] = useState<'YES'|'NO'>('YES');
-  const [autoSizeFromBalance, setAutoSizeFromBalance] = useState(true);
+
+  const activeTokenId = marketInfo 
+    ? (activeOutcome === 'UP' ? (marketInfo.upTokenId || marketInfo.yesTokenId) : (marketInfo.downTokenId || marketInfo.noTokenId))
+    : '';
+
+  const activePosition = positions.find(p => p.tokenId === activeTokenId);
+  const availableShares = activePosition ? parseFloat(activePosition.netSize || activePosition.netShares || '0') : 0;
 
   useEffect(() => {
-    fetch('http://localhost:3001/api/v1/presets')
-      .then(r => r.json())
-      .then(data => setPresets(data))
-      .catch(console.error);
-  }, []);
-
-  useEffect(() => {
-    if (!marketInfo?.lastUpdated) return;
+    if (!marketInfo?.targetTime) return;
     const interval = setInterval(() => {
-      setDataAge(Date.now() - marketInfo.lastUpdated);
-      if (marketInfo.targetTime) {
-        const diff = marketInfo.targetTime - Date.now();
-        if (diff > 0) {
-          const m = Math.floor(diff / 60000);
-          const s = Math.floor((diff % 60000) / 1000);
-          setCountdown(`${m}m ${s}s`);
-        } else {
-          setCountdown('Resolved');
-        }
+      const diff = marketInfo.targetTime! - Date.now();
+      if (diff > 0) {
+        const m = Math.floor(diff / 60000);
+        const s = Math.floor((diff % 60000) / 1000);
+        setCountdown(`${m}m ${s}s`);
+      } else {
+        setCountdown('RESOLVED / SWITCHING');
       }
     }, 100);
     return () => clearInterval(interval);
@@ -51,257 +83,342 @@ const TradingPanel: React.FC<Props> = ({ marketInfo, discoveredMarkets = [], sen
     setIsSubmitting(false);
   }, [orders]);
 
-  useEffect(() => {
-    if (!autoSizeFromBalance || balance <= 0) return;
-    setSize(formatUsdSize(balance));
-  }, [autoSizeFromBalance, balance]);
+  const handleArmLive = () => {
+    sendMessage({ type: 'ARM_LIVE', payload: { durationSeconds: 300 } });
+  };
 
-  useEffect(() => {
-    const currentMarket = discoveredMarkets.find(m => m.type === 'CURRENT');
-    if (!currentMarket) return;
-    if (marketInfo?.marketId === currentMarket.marketId && Date.now() < (marketInfo.targetTime || 0)) return;
+  const handleDisarmLive = () => {
+    sendMessage({ type: 'DISARM_LIVE' });
+  };
 
-    sendMessage({
-      type: 'SUBSCRIBE_MARKET',
-      payload: {
-        conditionId: currentMarket.conditionId,
-        yesTokenId: currentMarket.yesTokenId,
-        noTokenId: currentMarket.noTokenId
-      }
-    });
-  }, [discoveredMarkets, marketInfo?.marketId, marketInfo?.targetTime, sendMessage]);
-
-  useEffect(() => {
-    const listener = (message: any) => {
-      if (message.type === 'WS_EVENT' && (message.payload.type === 'ORDER_UPDATE' || message.payload.type === 'ERROR')) {
-        setIsSubmitting(false);
-        if (message.payload.type === 'ERROR') {
-          setError(message.payload.error || 'An error occurred');
-        }
-      }
-    };
-    chrome.runtime.onMessage.addListener(listener);
-    return () => chrome.runtime.onMessage.removeListener(listener);
-  }, []);
-
-  const handleTrade = (side: Side, tokenId?: string, overridePrice?: string) => {
-    if (!tokenId) return;
+  const handlePlaceOrder = (side: Side, capturedPrice: string, capturedSize: string, capturedUsd?: string) => {
+    if (!activeTokenId) return;
     setError('');
     setIsSubmitting(true);
     sendMessage({
       type: 'PLACE_ORDER',
       id: crypto.randomUUID(),
       payload: {
-        tokenId,
+        tokenId: activeTokenId,
+        outcome: activeOutcome,
         side,
-        size,
-        price: overridePrice || price
+        dollarSpend: capturedUsd,
+        size: capturedSize,
+        price: capturedPrice,
+        orderType: 'GTC'
       }
     });
   };
 
-  const updateManualSize = (value: string) => {
-    setAutoSizeFromBalance(false);
-    setSize(value);
-  };
-
-  const setSizeFromBalancePercent = (pct: string) => {
-    const pctVal = parseFloat(pct) / 100;
-    setAutoSizeFromBalance(false);
-    setSize(formatUsdSize(balance * pctVal));
-  };
-
-  const getPresetPrice = (preset: PresetConfig, tokenId: string) => {
+  const calculatePresetPrice = (preset: PresetConfig): string | null => {
     if (!marketInfo) return null;
-    const isYes = tokenId === marketInfo.yesTokenId;
-    const bidStr = isYes ? marketInfo.yesBid : marketInfo.noBid;
-    const askStr = isYes ? marketInfo.yesAsk : marketInfo.noAsk;
-    const priceStr = isYes ? marketInfo.yesPrice : marketInfo.noPrice;
+    const isUp = activeOutcome === 'UP';
+    const bidStr = isUp ? (marketInfo.upBid || marketInfo.yesBid) : (marketInfo.downBid || marketInfo.noBid);
+    const askStr = isUp ? (marketInfo.upAsk || marketInfo.yesAsk) : (marketInfo.downAsk || marketInfo.noAsk);
+    const priceStr = isUp ? (marketInfo.upPrice || marketInfo.yesPrice) : (marketInfo.downPrice || marketInfo.noPrice);
 
-    let refPrice = parseFloat(priceStr || '0');
-    if (preset.reference === 'BEST_BID') refPrice = parseFloat(bidStr || priceStr || '0');
-    if (preset.reference === 'BEST_ASK') refPrice = parseFloat(askStr || priceStr || '0');
+    let refPrice = parseFloat(priceStr || '0.50');
+    if (preset.reference === 'BEST_BID' && bidStr) refPrice = parseFloat(bidStr);
+    if (preset.reference === 'BEST_ASK' && askStr) refPrice = parseFloat(askStr);
     if (preset.reference === 'MIDPOINT') {
-       const b = parseFloat(bidStr || priceStr || '0');
-       const a = parseFloat(askStr || priceStr || '0');
-       refPrice = (b + a) / 2;
+      const b = parseFloat(bidStr || priceStr || '0.50');
+      const a = parseFloat(askStr || priceStr || '0.50');
+      refPrice = (b + a) / 2;
     }
 
     if (refPrice <= 0) return null;
 
     let targetPrice = refPrice;
     if (preset.mode === 'CENT_OFFSET') {
-      targetPrice = refPrice + (preset.value / 100);
+      targetPrice = refPrice + preset.value;
     } else if (preset.mode === 'PERCENT_OFFSET') {
       targetPrice = refPrice * (1 + (preset.value / 100));
     } else if (preset.mode === 'ABSOLUTE_PRICE') {
       targetPrice = preset.value;
     }
 
-    const ask = parseFloat(askStr || '1');
-    const bid = parseFloat(bidStr || '0');
+    const ask = parseFloat(askStr || '0.99');
+    const bid = parseFloat(bidStr || '0.01');
 
     if (preset.side === 'BUY') {
-      const maxBuy = Math.max(0.01, ask - 0.01);
-      if (targetPrice > maxBuy) targetPrice = maxBuy;
+      const maxMakerBuy = Math.max(0.01, ask - 0.01);
+      if (targetPrice > maxMakerBuy) targetPrice = maxMakerBuy;
     } else {
-      const minSell = Math.min(0.99, bid + 0.01);
-      if (targetPrice < minSell) targetPrice = minSell;
+      const minMakerSell = Math.min(0.99, bid + 0.01);
+      if (targetPrice < minMakerSell) targetPrice = minMakerSell;
     }
 
     targetPrice = Math.round(targetPrice * 100) / 100;
-    
     if (targetPrice < 0.01 || targetPrice > 0.99) return null;
-    
+
     return targetPrice.toFixed(2);
   };
-  
-  const isStale = !rtdsMetrics?.connected || rtdsMetrics?.stale;
+
+  const isExecutionBlocked: boolean = !readiness || (readiness.blockingReasons && readiness.blockingReasons.length > 0) || !readiness.liveArmed;
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-3 font-sans text-xs">
+      {/* Operational State & Arming Header */}
+      <div className="bg-gray-800 p-2.5 rounded border border-gray-700 flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-1.5">
+            <span className={`w-2.5 h-2.5 rounded-full ${
+              operationalState === 'LIVE_ARMED' ? 'bg-green-500 animate-pulse' :
+              operationalState === 'LIVE_DISARMED' ? 'bg-yellow-500' :
+              operationalState === 'READ_ONLY' ? 'bg-blue-500' : 'bg-red-500'
+            }`} />
+            <span className="font-bold tracking-wider text-gray-200 uppercase">{operationalState}</span>
+          </div>
+
+          {readiness?.liveArmed ? (
+            <button 
+              onClick={handleDisarmLive}
+              className="flex items-center gap-1 bg-red-800 hover:bg-red-700 text-white text-[10px] px-2 py-1 rounded font-bold uppercase"
+            >
+              <Square size={12} /> Disarm
+            </button>
+          ) : (
+            <button 
+              onClick={handleArmLive}
+              disabled={Boolean(readiness && readiness.blockingReasons.filter(r => r !== 'LIVE EXECUTION DISARMED').length > 0)}
+              className="flex items-center gap-1 bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white text-[10px] px-2.5 py-1 rounded font-bold uppercase tracking-wider"
+            >
+              <Play size={12} /> HOLD TO ARM LIVE
+            </button>
+          )}
+        </div>
+
+        {/* Blocking reasons banner */}
+        {readiness && readiness.blockingReasons.length > 0 && (
+          <div className="bg-red-950/80 border border-red-800 p-1.5 rounded text-[10px] text-red-300 font-mono flex flex-col gap-0.5">
+            {readiness.blockingReasons.map((reason, idx) => (
+              <div key={idx} className="flex items-start gap-1">
+                <AlertTriangle size={10} className="shrink-0 mt-0.5" />
+                <span>{reason}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Discovered Markets Selector */}
       {discoveredMarkets.length > 0 && (
-        <div className="bg-gray-800 p-2 rounded text-xs flex gap-2 overflow-x-auto">
+        <div className="flex gap-1.5 overflow-x-auto pb-1">
           {discoveredMarkets.map(m => (
-            <div key={m.marketId} className={`p-1 px-2 rounded border cursor-pointer whitespace-nowrap ${(marketInfo && m.marketId === marketInfo.marketId) ? 'bg-blue-900 border-blue-500' : 'bg-gray-700 border-gray-600'} `} onClick={() => {
-              sendMessage({
-                type: 'SUBSCRIBE_MARKET',
-                payload: {
-                  conditionId: m.conditionId,
-                  yesTokenId: m.yesTokenId,
-                  noTokenId: m.noTokenId
-                }
-              });
-            }}>
+            <button
+              key={m.marketId}
+              onClick={() => {
+                sendMessage({
+                  type: 'SUBSCRIBE_MARKET',
+                  payload: {
+                    conditionId: m.conditionId,
+                    yesTokenId: m.upTokenId || m.yesTokenId,
+                    noTokenId: m.downTokenId || m.noTokenId,
+                    upTokenId: m.upTokenId || m.yesTokenId,
+                    downTokenId: m.downTokenId || m.noTokenId,
+                  }
+                });
+              }}
+              className={`px-2 py-1 rounded text-[10px] border font-mono whitespace-nowrap ${
+                marketInfo?.marketId === m.marketId 
+                  ? 'bg-blue-900 border-blue-500 text-white font-bold' 
+                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700'
+              }`}
+            >
               {m.type === 'CURRENT' && <span className="text-green-400 font-bold mr-1">•</span>}
               {m.type === 'NEXT' && <span className="text-yellow-400 font-bold mr-1">•</span>}
-              {m.title ? m.title.substring(0, 20) + '...' : m.marketId.substring(0, 8)}
-            </div>
+              {m.title ? m.title.substring(0, 18) : m.marketId.substring(0, 8)}
+            </button>
           ))}
         </div>
       )}
 
-      {!marketInfo ? (
-        <div className="text-center text-gray-500 mt-10">Select a market from above or wait for discovery...</div>
-      ) : (
-        <>
-          <div className="bg-gray-800 p-3 rounded">
-            {countdown && <div className="text-center text-xs font-mono text-yellow-400 mb-2">{countdown}</div>}
-            <div className="flex justify-between text-xs mt-2 border-t border-gray-700 pt-2">
-              <div className="flex flex-col">
-                <span className="text-gray-400 mb-1">YES</span>
-                <div className="flex gap-2">
-                  <span className="text-green-400 cursor-pointer hover:underline" onClick={() => setPrice(marketInfo.yesBid || marketInfo.yesPrice)}>Bid: {marketInfo.yesBid || marketInfo.yesPrice}</span>
-                  <span className="text-red-400 cursor-pointer hover:underline" onClick={() => setPrice(marketInfo.yesAsk || marketInfo.yesPrice)}>Ask: {marketInfo.yesAsk || marketInfo.yesPrice}</span>
-                </div>
-              </div>
-              <div className="flex flex-col items-end">
-                <span className="text-gray-400 mb-1">NO</span>
-                <div className="flex gap-2">
-                  <span className="text-green-400 cursor-pointer hover:underline" onClick={() => setPrice(marketInfo.noBid || marketInfo.noPrice)}>Bid: {marketInfo.noBid || marketInfo.noPrice}</span>
-                  <span className="text-red-400 cursor-pointer hover:underline" onClick={() => setPrice(marketInfo.noAsk || marketInfo.noPrice)}>Ask: {marketInfo.noAsk || marketInfo.noPrice}</span>
-                </div>
-              </div>
-            </div>
+      {/* Chainlink Reference & Price Anchor Card */}
+      <div className="bg-gray-800 p-2.5 rounded border border-gray-700 flex flex-col gap-1.5 font-mono text-[11px]">
+        <div className="flex justify-between items-center text-gray-400 text-[10px]">
+          <span>BTC/USD CHAINLINK REFERENCE</span>
+          <span>AGE: {rtdsMetrics?.dataAgeMs ? (rtdsMetrics.dataAgeMs / 1000).toFixed(1) : '0.0'}s</span>
+        </div>
+        <div className="flex justify-between items-baseline">
+          <div>
+            <span className="text-gray-400 text-[10px] block">PRICE TO BEAT</span>
+            <span className="text-sm font-bold text-yellow-400">
+              {rtdsMetrics?.priceToBeat && parseFloat(rtdsMetrics.priceToBeat) > 0 
+                ? `$${parseFloat(rtdsMetrics.priceToBeat).toLocaleString('en-US', { minimumFractionDigits: 2 })}` 
+                : 'ANCHOR PENDING'}
+            </span>
           </div>
+          <div className="text-right">
+            <span className="text-gray-400 text-[10px] block">CHAINLINK LIVE</span>
+            <span className="text-sm font-bold text-white">
+              {rtdsMetrics?.currentPrice ? `$${rtdsMetrics.currentPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}` : 'OFFLINE'}
+            </span>
+          </div>
+        </div>
+        {rtdsMetrics?.difference !== undefined && (
+          <div className="flex justify-between items-center text-[10px] pt-1 border-t border-gray-700/60">
+            <span className="text-gray-400">DIFF: {rtdsMetrics.difference >= 0 ? `+$${rtdsMetrics.difference.toFixed(2)}` : `-$${Math.abs(rtdsMetrics.difference).toFixed(2)}`}</span>
+            <span className={`font-bold ${rtdsMetrics.leadingOutcome === 'UP' ? 'text-green-400' : rtdsMetrics.leadingOutcome === 'DOWN' ? 'text-red-400' : 'text-gray-400'}`}>
+              LEADING: {rtdsMetrics.leadingOutcome || 'NONE'}
+            </span>
+          </div>
+        )}
+      </div>
 
-      <div className="grid grid-cols-2 gap-2 text-sm">
-        <div className="flex flex-col gap-1">
-          <label className="text-xs text-gray-400">Size (USD)</label>
+      {/* Market Prices Overview */}
+      {marketInfo && (
+        <div className="bg-gray-800 p-2 rounded border border-gray-700 flex justify-between items-center text-[11px] font-mono">
+          <div className="flex items-center gap-2">
+            <span className="text-green-400 font-bold">UP</span>
+            <span>BID: {marketInfo.upBid || marketInfo.yesBid || '0.00'}</span>
+            <span>ASK: {marketInfo.upAsk || marketInfo.yesAsk || '0.00'}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-red-400 font-bold">DOWN</span>
+            <span>BID: {marketInfo.downBid || marketInfo.noBid || '0.00'}</span>
+            <span>ASK: {marketInfo.downAsk || marketInfo.noAsk || '0.00'}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Outcome Switcher */}
+      <div className="flex gap-1.5">
+        <button 
+          onClick={() => setActiveOutcome('UP')}
+          className={`flex-1 py-1.5 rounded font-bold text-xs border transition-colors ${
+            activeOutcome === 'UP' ? 'bg-green-700 border-green-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700'
+          }`}
+        >
+          UP OUTCOME
+        </button>
+        <button 
+          onClick={() => setActiveOutcome('DOWN')}
+          className={`flex-1 py-1.5 rounded font-bold text-xs border transition-colors ${
+            activeOutcome === 'DOWN' ? 'bg-red-700 border-red-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700'
+          }`}
+        >
+          DOWN OUTCOME
+        </button>
+      </div>
+
+      {/* BUY Sizing Section */}
+      <div className="bg-gray-800 p-2.5 rounded border border-gray-700 flex flex-col gap-2">
+        <div className="flex justify-between items-center text-[11px]">
+          <span className="font-bold text-green-400 uppercase">BUY SIZING (USD)</span>
+          <span className="text-gray-400 font-mono">BAL: ${balance.toFixed(2)}</span>
+        </div>
+        <div className="flex gap-1">
+          {['10', '25', '50', '100'].map(usd => (
+            <button
+              key={usd}
+              onClick={() => setBuyUsdSpend(usd)}
+              className={`flex-1 py-1 rounded text-xs font-mono border ${
+                buyUsdSpend === usd ? 'bg-green-800 border-green-500 text-white font-bold' : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'
+              }`}
+            >
+              ${usd}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-[10px] text-gray-400">Custom USD:</label>
           <input 
-            type="number" 
-            value={size} 
-            placeholder={balance > 0 ? formatUsdSize(balance) : '0.00'}
-            onChange={e => updateManualSize(e.target.value)}
-            className="bg-gray-800 border border-gray-700 rounded p-1 text-white outline-none focus:border-blue-500"
-            disabled={isSubmitting}
+            type="number"
+            value={buyUsdSpend}
+            onChange={e => setBuyUsdSpend(e.target.value)}
+            className="flex-1 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-white font-mono text-xs outline-none focus:border-blue-500"
+            placeholder="Spend USD"
           />
-          <div className="flex gap-1 mt-1">
-            {['25', '50', '75', '100'].map(pct => (
-              <button 
-                key={pct} 
-                onClick={() => {
-                  setSizeFromBalancePercent(pct);
-                }} 
-                className="flex-1 bg-gray-700 hover:bg-gray-600 text-[10px] py-1 rounded"
+        </div>
+
+        {/* Dynamic BUY Price Buttons */}
+        <div className="text-[10px] text-gray-400 font-bold pt-1 border-t border-gray-700">BUY {activeOutcome} MAKER PRESETS</div>
+        <div className="grid grid-cols-3 gap-1.5">
+          {presets.filter(p => p.side === 'BUY' && p.active).map(preset => {
+            const price = calculatePresetPrice(preset);
+            const priceNum = price ? parseFloat(price) : 0.5;
+            const spendNum = parseFloat(buyUsdSpend) || 10;
+            const shares = priceNum > 0 ? (spendNum / priceNum).toFixed(1) : '0';
+            const priceCents = price ? Math.round(parseFloat(price) * 100) : '-';
+
+            return (
+              <button
+                key={preset.id}
+                onPointerDown={() => price && handlePlaceOrder('BUY', price, shares, buyUsdSpend)}
+                disabled={isExecutionBlocked || !price || isSubmitting}
+                className="bg-green-700 hover:bg-green-600 disabled:opacity-40 py-2 rounded text-center font-mono font-bold text-white border border-green-500/50 shadow flex flex-col items-center justify-center"
+                title={`${preset.name} - Est Shares: ${shares}`}
               >
-                {pct}%
+                <span className="text-sm">[{priceCents}¢]</span>
+                <span className="text-[9px] text-green-200 font-normal">(${buyUsdSpend})</span>
               </button>
-            ))}
-          </div>
+            );
+          })}
         </div>
-        <div className="flex flex-col gap-1">
-          <label className="text-xs text-gray-400">Limit Price</label>
+      </div>
+
+      {/* SELL Sizing Section */}
+      <div className="bg-gray-800 p-2.5 rounded border border-gray-700 flex flex-col gap-2">
+        <div className="flex justify-between items-center text-[11px]">
+          <span className="font-bold text-red-400 uppercase">SELL SIZING ({activeOutcome} POSITION)</span>
+          <span className="text-gray-400 font-mono">HELD: {availableShares.toFixed(1)} SHARES</span>
+        </div>
+        <div className="flex gap-1">
+          {['25', '50', '100'].map(pct => (
+            <button
+              key={pct}
+              onClick={() => {
+                const calculated = (availableShares * (parseFloat(pct) / 100)).toFixed(1);
+                setSellShares(calculated);
+              }}
+              className="flex-1 py-1 bg-gray-700 hover:bg-gray-600 border border-gray-600 rounded text-xs font-mono text-gray-300"
+            >
+              {pct}%
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-[10px] text-gray-400">Custom Shares:</label>
           <input 
-            type="number" 
-            step="0.01" 
-            value={price} 
-            onChange={e => setPrice(e.target.value)}
-            className="bg-gray-800 border border-gray-700 rounded p-1 text-white outline-none focus:border-blue-500"
-            disabled={isSubmitting}
+            type="number"
+            value={sellShares}
+            onChange={e => setSellShares(e.target.value)}
+            className="flex-1 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-white font-mono text-xs outline-none focus:border-blue-500"
+            placeholder="Shares to sell"
           />
-          <div className="flex gap-1 mt-1">
-            <button onClick={() => setPrice(p => Math.max(0.01, parseFloat(p) - 0.01).toFixed(2))} className="flex-1 bg-gray-700 hover:bg-gray-600 text-[10px] py-1 rounded">-1c</button>
-            <button onClick={() => setPrice(p => Math.min(0.99, parseFloat(p) + 0.01).toFixed(2))} className="flex-1 bg-gray-700 hover:bg-gray-600 text-[10px] py-1 rounded">+1c</button>
-          </div>
+        </div>
+
+        {/* Dynamic SELL Price Buttons */}
+        <div className="text-[10px] text-gray-400 font-bold pt-1 border-t border-gray-700">SELL {activeOutcome} MAKER PRESETS</div>
+        <div className="grid grid-cols-3 gap-1.5">
+          {presets.filter(p => p.side === 'SELL' && p.active).map(preset => {
+            const price = calculatePresetPrice(preset);
+            const sharesToSell = sellShares || availableShares.toFixed(1);
+            const priceCents = price ? Math.round(parseFloat(price) * 100) : '-';
+
+            return (
+              <button
+                key={preset.id}
+                onPointerDown={() => price && parseFloat(sharesToSell) > 0 && handlePlaceOrder('SELL', price, sharesToSell)}
+                disabled={isExecutionBlocked || !price || parseFloat(sharesToSell) <= 0 || isSubmitting}
+                className="bg-red-700 hover:bg-red-600 disabled:opacity-40 py-2 rounded text-center font-mono font-bold text-white border border-red-500/50 shadow flex flex-col items-center justify-center"
+                title={`${preset.name} - Shares: ${sharesToSell}`}
+              >
+                <span className="text-sm">[{priceCents}¢]</span>
+                <span className="text-[9px] text-red-200 font-normal">({sharesToSell} sh)</span>
+              </button>
+            );
+          })}
         </div>
       </div>
 
-      {error && <p className="text-red-500 text-xs">{error}</p>}
-      {isStale && <p className="text-red-500 text-xs">Trading disabled: Reference price is stale or disconnected</p>}
-
-      <div className="flex gap-2 mt-2">
-         <button onClick={() => setActiveSide('YES')} className={`flex-1 py-1 rounded font-bold text-sm ${activeSide === 'YES' ? 'bg-green-600' : 'bg-gray-700'}`}>YES</button>
-         <button onClick={() => setActiveSide('NO')} className={`flex-1 py-1 rounded font-bold text-sm ${activeSide === 'NO' ? 'bg-red-600' : 'bg-gray-700'}`}>NO</button>
-      </div>
-
-      <div className="grid grid-cols-2 gap-4 mt-2">
-        <div className="flex flex-col gap-2">
-          <div className="text-xs text-gray-400 font-bold text-center border-b border-gray-700 pb-1">BUY PRESETS</div>
-          {presets.filter(p => p.side === 'BUY' && p.active).map(p => {
-             const activeTokenId = activeSide === 'YES' ? marketInfo.yesTokenId : marketInfo.noTokenId;
-             const pr = getPresetPrice(p, activeTokenId);
-             return (
-               <button 
-                 key={p.id}
-                 onPointerDown={() => pr && handleTrade('BUY', activeTokenId, pr)} 
-                 disabled={!pr || isSubmitting || isStale}
-                 className="flex items-center justify-between px-2 bg-green-700 hover:bg-green-600 disabled:opacity-50 py-2 rounded text-xs font-bold"
-               >
-                 <span>{p.name}</span>
-                 <span>[{pr ? `${Math.round(parseFloat(pr)*100)}¢` : '-'}]</span>
-               </button>
-             )
-          })}
+      {error && (
+        <div className="bg-red-900/80 border border-red-500 text-red-200 p-2 rounded text-xs font-mono">
+          {error}
         </div>
-        <div className="flex flex-col gap-2">
-          <div className="text-xs text-gray-400 font-bold text-center border-b border-gray-700 pb-1">SELL PRESETS</div>
-          {presets.filter(p => p.side === 'SELL' && p.active).map(p => {
-             const activeTokenId = activeSide === 'YES' ? marketInfo.yesTokenId : marketInfo.noTokenId;
-             const pr = getPresetPrice(p, activeTokenId);
-             return (
-               <button 
-                 key={p.id}
-                 onPointerDown={() => pr && handleTrade('SELL', activeTokenId, pr)} 
-                 disabled={!pr || isSubmitting || isStale}
-                 className="flex items-center justify-between px-2 bg-red-700 hover:bg-red-600 disabled:opacity-50 py-2 rounded text-xs font-bold"
-               >
-                 <span>{p.name}</span>
-                 <span>[{pr ? `${Math.round(parseFloat(pr)*100)}¢` : '-'}]</span>
-               </button>
-             )
-          })}
-        </div>
-        </div>
-      </>
       )}
     </div>
   );
 };
-
-function formatUsdSize(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return '';
-  return Math.min(value, 1000).toFixed(2);
-}
 
 export default TradingPanel;

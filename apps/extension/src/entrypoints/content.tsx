@@ -8,7 +8,7 @@ import tailwindCss from '../assets/tailwind.css?inline';
 export default defineContentScript({
   matches: ['*://*.polymarket.com/*', '*://polymarket.com/*'],
   cssInjectionMode: 'manifest',
-  async main(ctx) {
+  async main(ctx: any) {
     console.log('PolyBTC Terminal: Content script injected and running!');
     const ui = await createShadowRootUi(ctx, {
       name: 'polymarket-btc-terminal',
@@ -16,7 +16,7 @@ export default defineContentScript({
       anchor: 'html',
       append: 'last',
       zIndex: 2147483647,
-      onMount: (container) => {
+      onMount: (container: HTMLElement) => {
         const shadowRoot = container.getRootNode();
         if (shadowRoot instanceof ShadowRoot && 'adoptedStyleSheets' in shadowRoot) {
           const stylesheet = new CSSStyleSheet();
@@ -52,7 +52,7 @@ export default defineContentScript({
         root.render(<App />);
         return root;
       },
-      onRemove: (root) => {
+      onRemove: (root: any) => {
         if (root) {
           root.unmount();
         }

@@ -8,10 +8,10 @@
     "build:chrome": "wxt build",
     "build:firefox": "wxt build -b firefox",
     "package": "wxt zip",
-    "compile": "tsc --noEmit",
-    "lint": "echo lint",
-    "typecheck": "echo typecheck",
-    "test": "echo test"
+    "compile": "wxt prepare && tsc --noEmit",
+    "lint": "wxt prepare && tsc --noEmit",
+    "typecheck": "wxt prepare && tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "clsx": "2.1.0",
@@ -31,6 +31,7 @@
     "postcss": "8.4.33",
     "tailwindcss": "3.4.1",
     "typescript": "5.3.3",
+    "vitest": "2.1.9",
     "wxt": "0.17.0"
   }
 }

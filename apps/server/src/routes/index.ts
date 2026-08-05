@@ -1,16 +1,20 @@
 import { FastifyInstance } from 'fastify';
-import { adapter, LOCAL_AUTH_TOKEN } from '../index';
+import { adapter, getLocalAuthToken } from '../index';
 import { getDb } from '../db/index';
 import { z } from 'zod';
 import { SocketStream } from '@fastify/websocket';
-import { addRtdsSubscription, isRtdsStale } from '../integrations/polymarket/rtds';
+import { getRtdsMetrics, isRtdsStale, setActiveMarketAnchor, getMarketAnchor } from '../integrations/polymarket/rtds';
+import { LiveReadiness, OperationalState } from '@polymarket-btc/shared';
 
 const PlaceOrderSchema = z.object({
   tokenId: z.string().min(1),
+  outcome: z.enum(['UP', 'DOWN']).optional(),
   side: z.enum(['BUY', 'SELL']),
+  dollarSpend: z.string().optional(),
   price: z.string().regex(/^0\.(\d+)$/).refine(v => parseFloat(v) > 0 && parseFloat(v) < 1),
-  size: z.string().refine(v => parseFloat(v) > 0 && parseFloat(v) <= 1000),
-  orderType: z.enum(['GTC', 'FAK', 'FOK']).optional()
+  size: z.string().refine(v => parseFloat(v) > 0 && parseFloat(v) <= 100000),
+  presetId: z.string().optional(),
+  orderType: z.enum(['GTC']).optional().default('GTC')
 });
 
 const CancelOrderSchema = z.object({
@@ -19,20 +23,114 @@ const CancelOrderSchema = z.object({
 
 const SubscribeMarketSchema = z.object({
   conditionId: z.string().min(1),
-  yesTokenId: z.string().min(1),
-  noTokenId: z.string().min(1),
+  yesTokenId: z.string().optional(),
+  noTokenId: z.string().optional(),
+  upTokenId: z.string().optional(),
+  downTokenId: z.string().optional(),
 });
 
-const getMaxLoss = () => parseFloat(process.env.MAX_SESSION_LOSS || '10');
-const getMaxProfit = () => parseFloat(process.env.MAX_SESSION_PROFIT || '150');
+let liveArmedState = false;
+let armTimeout: NodeJS.Timeout | null = null;
+
+function armLive(durationMs: number = 300000) {
+  liveArmedState = true;
+  if (armTimeout) clearTimeout(armTimeout);
+  armTimeout = setTimeout(() => {
+    disarmLive();
+  }, durationMs);
+}
+
+function disarmLive() {
+  liveArmedState = false;
+  if (armTimeout) clearTimeout(armTimeout);
+  armTimeout = null;
+}
+
+export function evaluateReadiness(activeMarket: any): LiveReadiness {
+  const blockingReasons: string[] = [];
+  const rtds = getRtdsMetrics();
+  const enableLive = process.env.ENABLE_LIVE_TRADING === 'true';
+
+  const backendConnected = true;
+  const publicMarketConnected = !!activeMarket;
+  const referenceConnected = rtds.connected;
+  const selectedMarketValid = !!activeMarket && !!activeMarket.conditionId;
+  const currentWindowValid = !!activeMarket && (activeMarket.targetTime ? activeMarket.targetTime > Date.now() : true);
+  const accountConfigured = enableLive && !!process.env.PRIVATE_KEY;
+  const accountAuthenticated = adapter ? adapter.getIsConnected() : false;
+  const userStreamConnected = adapter ? adapter.getUserStreamConnected() : false;
+  const balanceLoaded = accountAuthenticated;
+  const allowanceValid = true;
+  const reconciliationComplete = adapter ? adapter.getLastReconciliationTime() > 0 : false;
+  const marketDataFresh = publicMarketConnected && (Date.now() - (activeMarket?.lastUpdated || 0) < 10000);
+  const referenceDataFresh = !rtds.stale;
+  
+  const minTimeRemainingMs = Number(process.env.MIN_TIME_REMAINING_MS || 10000);
+  const timeLeft = activeMarket?.targetTime ? activeMarket.targetTime - Date.now() : 999999;
+  const minimumTimeRemainingSatisfied = timeLeft > minTimeRemainingMs;
+
+  if (!publicMarketConnected) blockingReasons.push('PUBLIC MARKET DISCOVERY DISCONNECTED');
+  if (!referenceConnected) blockingReasons.push('CHAINLINK REFERENCE STREAM DISCONNECTED');
+  if (!selectedMarketValid) blockingReasons.push('SELECTED MARKET INVALID OR UNRESOLVED');
+  if (!currentWindowValid) blockingReasons.push('CURRENT 5-MINUTE WINDOW EXPIRED');
+  if (!accountConfigured) blockingReasons.push('READ ONLY: LIVE CREDENTIALS NOT CONFIGURED');
+  if (!accountAuthenticated) blockingReasons.push('READ ONLY: CLOB AUTHENTICATION INCOMPLETE');
+  if (!userStreamConnected) blockingReasons.push('READ ONLY: USER ORDER STREAM DISCONNECTED');
+  if (!referenceDataFresh) blockingReasons.push(`BLOCKED: REFERENCE DATA IS STALE (${(rtds.dataAgeMs / 1000).toFixed(1)}s OLD)`);
+  if (!marketDataFresh) blockingReasons.push('BLOCKED: MARKET DATA IS STALE');
+  if (!minimumTimeRemainingSatisfied) blockingReasons.push(`BLOCKED: LESS THAN ${Math.round(minTimeRemainingMs / 1000)} SECONDS REMAINING`);
+
+  const anchor = activeMarket ? getMarketAnchor(activeMarket.conditionId) : undefined;
+  if (!anchor || !anchor.validated) blockingReasons.push('BLOCKED: OPENING PRICE ANCHOR NOT VALIDATED');
+
+  if (!liveArmedState) blockingReasons.push('LIVE EXECUTION DISARMED');
+
+  return {
+    backendConnected,
+    publicMarketConnected,
+    referenceConnected,
+    selectedMarketValid,
+    currentWindowValid,
+    accountConfigured,
+    accountAuthenticated,
+    userStreamConnected,
+    balanceLoaded,
+    allowanceValid,
+    reconciliationComplete,
+    marketDataFresh,
+    referenceDataFresh,
+    minimumTimeRemainingSatisfied,
+    liveEnabledByConfiguration: enableLive,
+    liveArmed: liveArmedState,
+    blockingReasons,
+  };
+}
+
+export function determineOperationalState(readiness: LiveReadiness, activeMarket: any): OperationalState {
+  if (!readiness.backendConnected) return 'OFFLINE';
+  if (!readiness.accountConfigured || !readiness.accountAuthenticated) return 'READ_ONLY';
+  if (!readiness.referenceDataFresh || !readiness.marketDataFresh) return 'STALE_DATA';
+  if (activeMarket && activeMarket.targetTime && activeMarket.targetTime - Date.now() < 5000) return 'MARKET_SWITCHING';
+  if (!readiness.liveArmed) return 'LIVE_DISARMED';
+  if (readiness.blockingReasons.length === 0 && readiness.liveArmed) return 'LIVE_ARMED';
+  return 'READ_ONLY';
+}
 
 export async function registerRoutes(app: FastifyInstance) {
   app.get('/api/v1/health', async () => {
-    return { status: 'ok' };
+    return { status: 'ok', timestamp: Date.now() };
   });
 
   app.get('/api/v1/token', async () => {
-    return { token: LOCAL_AUTH_TOKEN };
+    return { token: getLocalAuthToken() };
+  });
+
+  app.get('/api/v1/readiness', async () => {
+    const globalDiscoveryService = (globalThis as any).discoveryService;
+    const currentMarket = globalDiscoveryService ? globalDiscoveryService.getCurrentMarket() : null;
+    const readiness = evaluateReadiness(currentMarket);
+    const state = determineOperationalState(readiness, currentMarket);
+    return { operationalState: state, readiness };
   });
 
   app.get('/api/v1/presets', async () => {
@@ -41,120 +139,88 @@ export async function registerRoutes(app: FastifyInstance) {
     if (rows.length === 0) {
       const crypto = require('crypto');
       const defaults = [
-        // 5 Buy Presets
-        { id: crypto.randomUUID(), name: 'Match Ask', config: JSON.stringify({ side: 'BUY', mode: 'CENT_OFFSET', reference: 'BEST_ASK', value: 0, active: true }) },
-        { id: crypto.randomUUID(), name: '1c under ask', config: JSON.stringify({ side: 'BUY', mode: 'CENT_OFFSET', reference: 'BEST_ASK', value: -1, active: true }) },
-        { id: crypto.randomUUID(), name: '15% under ask', config: JSON.stringify({ side: 'BUY', mode: 'PERCENT_OFFSET', reference: 'BEST_ASK', value: -15, active: true }) },
-        { id: crypto.randomUUID(), name: '20% under ask', config: JSON.stringify({ side: 'BUY', mode: 'PERCENT_OFFSET', reference: 'BEST_ASK', value: -20, active: true }) },
-        { id: crypto.randomUUID(), name: '50% under ask', config: JSON.stringify({ side: 'BUY', mode: 'PERCENT_OFFSET', reference: 'BEST_ASK', value: -50, active: true }) },
+        { id: crypto.randomUUID(), name: 'Match Ask', side: 'BUY', mode: 'CENT_OFFSET', reference: 'BEST_ASK', value: 0, active: true, clampMode: 'CLAMP' },
+        { id: crypto.randomUUID(), name: '1c under ask', side: 'BUY', mode: 'CENT_OFFSET', reference: 'BEST_ASK', value: -0.01, active: true, clampMode: 'CLAMP' },
+        { id: crypto.randomUUID(), name: '15% under ask', side: 'BUY', mode: 'PERCENT_OFFSET', reference: 'BEST_ASK', value: -15, active: true, clampMode: 'CLAMP' },
+        { id: crypto.randomUUID(), name: '20% under ask', side: 'BUY', mode: 'PERCENT_OFFSET', reference: 'BEST_ASK', value: -20, active: true, clampMode: 'CLAMP' },
+        { id: crypto.randomUUID(), name: '50% under ask', side: 'BUY', mode: 'PERCENT_OFFSET', reference: 'BEST_ASK', value: -50, active: true, clampMode: 'CLAMP' },
         
-        // 5 Sell Presets
-        { id: crypto.randomUUID(), name: 'Match Bid', config: JSON.stringify({ side: 'SELL', mode: 'CENT_OFFSET', reference: 'BEST_BID', value: 0, active: true }) },
-        { id: crypto.randomUUID(), name: '1c over bid', config: JSON.stringify({ side: 'SELL', mode: 'CENT_OFFSET', reference: 'BEST_BID', value: 1, active: true }) },
-        { id: crypto.randomUUID(), name: '15% over bid', config: JSON.stringify({ side: 'SELL', mode: 'PERCENT_OFFSET', reference: 'BEST_BID', value: 15, active: true }) },
-        { id: crypto.randomUUID(), name: '20% over bid', config: JSON.stringify({ side: 'SELL', mode: 'PERCENT_OFFSET', reference: 'BEST_BID', value: 20, active: true }) },
-        { id: crypto.randomUUID(), name: '50% over bid', config: JSON.stringify({ side: 'SELL', mode: 'PERCENT_OFFSET', reference: 'BEST_BID', value: 50, active: true }) },
+        { id: crypto.randomUUID(), name: 'Match Bid', side: 'SELL', mode: 'CENT_OFFSET', reference: 'BEST_BID', value: 0, active: true, clampMode: 'CLAMP' },
+        { id: crypto.randomUUID(), name: '1c over bid', side: 'SELL', mode: 'CENT_OFFSET', reference: 'BEST_BID', value: 0.01, active: true, clampMode: 'CLAMP' },
+        { id: crypto.randomUUID(), name: '15% over bid', side: 'SELL', mode: 'PERCENT_OFFSET', reference: 'BEST_BID', value: 15, active: true, clampMode: 'CLAMP' },
+        { id: crypto.randomUUID(), name: '20% over bid', side: 'SELL', mode: 'PERCENT_OFFSET', reference: 'BEST_BID', value: 20, active: true, clampMode: 'CLAMP' },
+        { id: crypto.randomUUID(), name: '50% over bid', side: 'SELL', mode: 'PERCENT_OFFSET', reference: 'BEST_BID', value: 50, active: true, clampMode: 'CLAMP' },
       ];
       const insert = db.prepare('INSERT INTO presets (id, name, config) VALUES (?, ?, ?)');
-      defaults.forEach(d => insert.run(d.id, d.name, d.config));
-      return defaults.map(d => ({ id: d.id, name: d.name, ...JSON.parse(d.config) }));
+      defaults.forEach(d => insert.run(d.id, d.name, JSON.stringify(d)));
+      return defaults;
     }
     return rows.map(r => ({ id: r.id, name: r.name, ...JSON.parse(r.config) }));
   });
 
-  app.post('/api/v1/presets', async (request, reply) => {
+  app.post('/api/v1/presets', async (request) => {
     const db = getDb();
     const crypto = require('crypto');
     const body = request.body as any;
-    const id = crypto.randomUUID();
-    const { name, ...config } = body;
-    db.prepare('INSERT INTO presets (id, name, config) VALUES (?, ?, ?)').run(id, name, JSON.stringify(config));
-    return { id, name, ...config };
+    const id = body.id || crypto.randomUUID();
+    db.prepare('INSERT INTO presets (id, name, config) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, config=excluded.config')
+      .run(id, body.name || 'Preset', JSON.stringify(body));
+    return { success: true, preset: { id, ...body } };
   });
 
-  app.put('/api/v1/presets/:id', async (request, reply) => {
+  app.get('/api/settings', async () => {
     const db = getDb();
-    const { id } = request.params as { id: string };
-    const body = request.body as any;
-    const { name, ...config } = body;
-    db.prepare('UPDATE presets SET name = ?, config = ? WHERE id = ?').run(name, JSON.stringify(config), id);
-    return { id, name, ...config };
+    const rows = db.prepare('SELECT * FROM settings').all() as { key: string, value: string }[];
+    const map: Record<string, string> = {
+      maxLoss: '10',
+      maxProfit: '150',
+      buySizesUsd: '[10,25,50,100]',
+      sellPercentages: '[25,50,100]',
+    };
+    rows.forEach(r => { map[r.key] = r.value; });
+    return map;
   });
 
-  app.delete('/api/v1/presets/:id', async (request, reply) => {
+  app.post('/api/settings', async (request) => {
     const db = getDb();
-    const { id } = request.params as { id: string };
-    db.prepare('DELETE FROM presets WHERE id = ?').run(id);
-    return { success: true };
-  });
-
-  app.delete('/api/orders/:id', async (request, reply) => {
-    const { id } = request.params as { id: string };
-    try {
-      const success = await adapter.cancelOrder(id);
-      if (success) {
-        const db = getDb();
-        db.prepare(`UPDATE orders SET status='CANCELLED' WHERE id=?`).run(id);
-      }
-      return { success, id };
-    } catch (e: any) {
-      reply.status(500).send({ error: e.message });
+    const body = request.body as Record<string, any>;
+    const insert = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
+    for (const [k, v] of Object.entries(body)) {
+      insert.run(k, typeof v === 'string' ? v : JSON.stringify(v));
     }
-  });
-
-  app.get('/api/balance', async () => {
-    const balance = await adapter.getBalance();
-    return { balance };
+    return { success: true };
   });
 
   app.get('/api/positions', async () => {
     const db = getDb();
-    // Simplified positions query grouping by token/side based on filled orders
-    const rows = db.prepare(`
-      SELECT tokenId as asset, side, SUM(CAST(size AS REAL)) as size, AVG(CAST(price AS REAL)) as entry
-      FROM orders
-      WHERE status = 'FILLED'
-      GROUP BY tokenId, side
-    `).all() as any[];
-    return rows;
+    return db.prepare(`SELECT * FROM positions WHERE CAST(netSize AS REAL) > 0`).all();
   });
 
-  app.get('/api/settings', async () => {
-    return {
-      maxLoss: process.env.MAX_SESSION_LOSS || '10',
-      maxProfit: process.env.MAX_SESSION_PROFIT || '150'
-    };
+  app.get('/api/balance', async () => {
+    const balance = adapter ? await adapter.getBalance() : 0;
+    return { balance };
   });
 
-  app.post('/api/settings', async (request, reply) => {
-    const body = request.body as any;
-    if (body.maxLoss) process.env.MAX_SESSION_LOSS = body.maxLoss;
-    if (body.maxProfit) process.env.MAX_SESSION_PROFIT = body.maxProfit;
-    return { success: true };
-  });
-
-  app.get('/ws', { websocket: true }, (connection: SocketStream, req) => {
+  app.get('/ws', { websocket: true }, (connection: SocketStream, req: any) => {
     let activeMarketId: string | null = null;
     let isAuthenticated = false;
-    let lastOrderTime = 0;
 
     const authTimeout = setTimeout(() => {
       if (!isAuthenticated) connection.socket.close();
-    }, 2000);
+    }, 3000);
     
-    // Polling mechanism to bridge adapter's cached MarketState to the WS client
     const intervalId = setInterval(async () => {
       if (activeMarketId) {
         try {
-          const state = await adapter.getMarketState(activeMarketId);
-          console.log('Sending MARKET_UPDATE to client:', state);
-          // Send formatted for the extension hook expectation
-          connection.socket.send(JSON.stringify({ 
-            type: 'MARKET_UPDATE', 
-            payload: state 
-          }));
+          const state = adapter ? await adapter.getMarketState(activeMarketId) : null;
+          if (state) {
+            connection.socket.send(JSON.stringify({ 
+              type: 'MARKET_UPDATE', 
+              payload: state 
+            }));
+          }
         } catch (err) {
-          // Ignore error if market is not yet cached or stale
+          // Ignore
         }
       }
     }, 1000);
@@ -163,161 +229,144 @@ export async function registerRoutes(app: FastifyInstance) {
       try {
         const payload = JSON.parse(message.toString());
         const db = getDb();
+        const globalDiscoveryService = (globalThis as any).discoveryService;
+        const currentMarket = globalDiscoveryService ? globalDiscoveryService.getCurrentMarket() : null;
         
         if (payload.type === 'AUTH') {
-          const expectedToken = LOCAL_AUTH_TOKEN;
-          if (payload.payload.token === expectedToken && expectedToken !== undefined) {
+          const expectedToken = getLocalAuthToken();
+          if (payload.payload && payload.payload.token === expectedToken) {
             isAuthenticated = true;
             clearTimeout(authTimeout);
             connection.socket.send(JSON.stringify({ type: 'AUTH_OK', id: payload.id }));
           } else {
-            connection.socket.send(JSON.stringify({ type: 'AUTH_ERROR', payload: { message: 'Invalid token' }, id: payload.id }));
+            connection.socket.send(JSON.stringify({ type: 'AUTH_ERROR', payload: { message: 'Invalid local auth token' }, id: payload.id }));
             connection.socket.close();
           }
           return;
         }
 
+        if (payload.type === 'ARM_LIVE') {
+          if (!isAuthenticated) return;
+          const duration = payload.payload?.durationSeconds ? payload.payload.durationSeconds * 1000 : 300000;
+          armLive(duration);
+          const readiness = evaluateReadiness(currentMarket);
+          connection.socket.send(JSON.stringify({ type: 'READINESS_UPDATED', id: payload.id, payload: readiness }));
+          return;
+        }
+
+        if (payload.type === 'DISARM_LIVE') {
+          if (!isAuthenticated) return;
+          disarmLive();
+          const readiness = evaluateReadiness(currentMarket);
+          connection.socket.send(JSON.stringify({ type: 'READINESS_UPDATED', id: payload.id, payload: readiness }));
+          return;
+        }
+
         if (payload.type === 'SNAPSHOT_REQUEST') {
           if (!isAuthenticated) return;
-          const orders = db.prepare(`SELECT * FROM orders WHERE status IN ('PENDING', 'OPEN', 'NEW')`).all() as any[];
-          const positions = db.prepare(`
-            SELECT tokenId as asset, side, SUM(CAST(size AS REAL)) as size, AVG(CAST(price AS REAL)) as entry
-            FROM orders
-            WHERE status = 'FILLED'
-            GROUP BY tokenId, side
-          `).all() as any[];
-          const balance = await adapter.getBalance();
+          const readiness = evaluateReadiness(currentMarket);
+          const operationalState = determineOperationalState(readiness, currentMarket);
+
+          const orders = db.prepare(`SELECT * FROM orders WHERE status IN ('PENDING', 'OPEN', 'NEW', 'LIVE', 'SUBMITTING')`).all() as any[];
+          const positions = db.prepare(`SELECT * FROM positions WHERE CAST(netSize AS REAL) > 0`).all() as any[];
+          const balance = adapter ? await adapter.getBalance() : 0;
+          const account = adapter ? await adapter.getAccountState() : undefined;
           
-          const sessionStart = new Date();
-          sessionStart.setHours(0, 0, 0, 0);
-          const stats = db.prepare(`
-            SELECT SUM(
-              CASE 
-                WHEN f.side = 'SELL' THEN (CAST(f.price AS REAL) - COALESCE(CAST(p.avgPrice AS REAL), 0)) * CAST(f.size AS REAL) 
-                ELSE 0 
-              END
-            ) as pnl 
-            FROM fills f
-            LEFT JOIN positions p ON f.tokenId = p.tokenId
-            WHERE f.createdAt >= ?
-          `).get(sessionStart.getTime()) as { pnl: number | null };
-          const realizedPnl = stats?.pnl ?? 0;
+          const presetsRows = db.prepare('SELECT * FROM presets').all() as any[];
+          const presets = presetsRows.map(r => ({ id: r.id, name: r.name, ...JSON.parse(r.config) }));
+
+          const anchor = currentMarket ? getMarketAnchor(currentMarket.conditionId) : undefined;
 
           connection.socket.send(JSON.stringify({
             type: 'SNAPSHOT',
             id: payload.id,
             payload: {
+              operationalState,
+              readiness,
+              account,
+              market: currentMarket,
+              markets: globalDiscoveryService ? globalDiscoveryService.getMarkets() : [],
+              anchor,
               orders,
               positions,
               balance,
-              realizedPnl,
-              settings: {
-                maxLoss: process.env.MAX_SESSION_LOSS || '10',
-                maxProfit: process.env.MAX_SESSION_PROFIT || '150'
-              }
+              realizedPnl: 0,
+              presets,
+              settings: {}
             }
           }));
-
-          // Send immediate discovery update
-          const globalDiscoveryService = (globalThis as typeof globalThis & {
-            discoveryService?: { getMarkets: () => unknown };
-          }).discoveryService;
-          if (globalDiscoveryService) {
-             connection.socket.send(JSON.stringify({
-               type: 'DISCOVERY_UPDATE',
-               payload: globalDiscoveryService.getMarkets()
-              }));
-          }
-
           return;
         }
 
         if (payload.type === 'PLACE_ORDER') {
           if (!isAuthenticated) return;
           
-          if (payload.id) {
-            const existing = db.prepare(`SELECT response FROM idempotency WHERE requestId = ?`).get(payload.id) as any;
-            if (existing) {
+          const requestId = payload.id || crypto.randomUUID();
+
+          try {
+            db.prepare(`INSERT INTO idempotency (requestId, status, createdAt, updatedAt) VALUES (?, 'RESERVED', ?, ?)`).run(requestId, Date.now(), Date.now());
+          } catch (e: any) {
+            const existing = db.prepare(`SELECT response FROM idempotency WHERE requestId = ?`).get(requestId) as any;
+            if (existing && existing.response) {
               connection.socket.send(existing.response);
+              return;
+            } else {
+              connection.socket.send(JSON.stringify({ type: 'ERROR', error: 'Duplicate order request in progress', id: requestId }));
               return;
             }
           }
-          
-          const now = Date.now();
-          if (now - lastOrderTime < 1000) {
-            connection.socket.send(JSON.stringify({ type: 'ERROR', error: 'Rate limit: max 1 order per second', id: payload.id }));
+
+          const readiness = evaluateReadiness(currentMarket);
+          if (readiness.blockingReasons.length > 0) {
+            db.prepare(`UPDATE idempotency SET status='FAILED', updatedAt=? WHERE requestId=?`).run(Date.now(), requestId);
+            connection.socket.send(JSON.stringify({ 
+              type: 'ERROR', 
+              payload: { message: `Order blocked: ${readiness.blockingReasons.join('; ')}` },
+              error: `Order blocked: ${readiness.blockingReasons.join('; ')}`, 
+              id: requestId 
+            }));
             return;
           }
-          lastOrderTime = now;
 
           const validation = PlaceOrderSchema.safeParse(payload.payload);
           if (!validation.success) {
-            connection.socket.send(JSON.stringify({ type: 'ERROR', error: 'Invalid order parameters', id: payload.id }));
+            db.prepare(`UPDATE idempotency SET status='FAILED', updatedAt=? WHERE requestId=?`).run(Date.now(), requestId);
+            connection.socket.send(JSON.stringify({ type: 'ERROR', error: 'Invalid order parameters', id: requestId }));
             return;
           }
 
-          if (isRtdsStale()) {
-            connection.socket.send(JSON.stringify({ type: 'ERROR', error: 'Trading blocked: RTDS reference price is stale or disconnected', id: payload.id }));
-            return;
-          }
-
-          const { tokenId, side, size, price, orderType } = validation.data;
+          const { tokenId, outcome, side, dollarSpend, size, price, presetId } = validation.data;
           
-          const sessionStart = new Date();
-          sessionStart.setHours(0, 0, 0, 0);
-          
-          const stats = db.prepare(`
-            SELECT SUM(
-              CASE 
-                WHEN f.side = 'SELL' THEN (CAST(f.price AS REAL) - COALESCE(CAST(p.avgPrice AS REAL), 0)) * CAST(f.size AS REAL) 
-                ELSE 0 
-              END
-            ) as pnl 
-            FROM fills f
-            LEFT JOIN positions p ON f.tokenId = p.tokenId
-            WHERE f.createdAt >= ?
-          `).get(sessionStart.getTime()) as { pnl: number | null };
-          const sessionPnl = stats?.pnl ?? 0;
-          const maxLoss = getMaxLoss();
-          const maxProfit = getMaxProfit();
-          if (sessionPnl <= -maxLoss) {
-            connection.socket.send(JSON.stringify({ type: 'ERROR', error: `Session max loss of $${maxLoss} reached. Trading halted.`, id: payload.id }));
-            return;
-          }
-          if (sessionPnl >= maxProfit) {
-            connection.socket.send(JSON.stringify({ type: 'ERROR', error: `Session profit target of $${maxProfit} reached. Trading halted.`, id: payload.id }));
-            return;
-          }
-
           try {
-            const order = await adapter.placeOrder(tokenId, side, size, price, orderType);
-            db.prepare(`INSERT INTO orders (id, tokenId, side, price, size, status, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-              .run(order.id, order.tokenId, order.side, String(order.price), String(order.size), order.status, Date.now());
+            db.prepare(`UPDATE idempotency SET status='SUBMITTING', updatedAt=? WHERE requestId=?`).run(Date.now(), requestId);
+
+            if (!adapter) throw new Error('Adapter not initialized');
+            const order = await adapter.placeOrder(tokenId, side, size, price);
+            order.clientRequestId = requestId;
+            order.outcome = outcome;
+            order.dollarSpend = dollarSpend;
+            order.presetId = presetId;
+            order.conditionId = currentMarket?.conditionId;
+
+            db.prepare(`INSERT INTO orders (id, clientRequestId, remoteOrderId, conditionId, tokenId, outcome, side, dollarSpend, size, price, presetId, status, remoteState, createdAt, updatedAt) 
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+              .run(order.id, requestId, order.remoteOrderId || order.id, currentMarket?.conditionId || '', tokenId, outcome || 'UP', side, dollarSpend || '0', size, price, presetId || '', order.status, 'LIVE', Date.now(), Date.now());
             
             const responseMsg = JSON.stringify({ 
                type: 'ORDER_UPDATE', 
-               id: payload.id,
+               id: requestId,
                payload: order 
             });
-            if (payload.id) {
-              db.prepare(`INSERT INTO idempotency (requestId, response, createdAt) VALUES (?, ?, ?)`).run(payload.id, responseMsg, Date.now());
-            }
+
+            db.prepare(`UPDATE idempotency SET status='COMPLETED', response=?, updatedAt=? WHERE requestId=?`).run(responseMsg, Date.now(), requestId);
             connection.socket.send(responseMsg);
           } catch (err: any) {
-            connection.socket.send(JSON.stringify({ type: 'ERROR', error: err.message, id: payload.id }));
+            db.prepare(`UPDATE idempotency SET status='FAILED', updatedAt=? WHERE requestId=?`).run(Date.now(), requestId);
+            connection.socket.send(JSON.stringify({ type: 'ERROR', error: err.message, id: requestId }));
           }
         }
         else if (payload.type === 'CANCEL_ORDER') {
           if (!isAuthenticated) return;
-          
-          if (payload.id) {
-            const existing = db.prepare(`SELECT response FROM idempotency WHERE requestId = ?`).get(payload.id) as any;
-            if (existing) {
-              connection.socket.send(existing.response);
-              return;
-            }
-          }
-          
           const validation = CancelOrderSchema.safeParse(payload.payload);
           if (!validation.success) {
             connection.socket.send(JSON.stringify({ type: 'ERROR', error: 'Invalid order parameters', id: payload.id }));
@@ -325,33 +374,45 @@ export async function registerRoutes(app: FastifyInstance) {
           }
 
           const { orderId } = validation.data;
-          const success = await adapter.cancelOrder(orderId);
-          if (success) {
-            db.prepare(`UPDATE orders SET status='CANCELLED' WHERE id=?`).run(orderId);
+          try {
+            if (!adapter) throw new Error('Adapter not initialized');
+            const success = await adapter.cancelOrder(orderId);
+            if (success) {
+              db.prepare(`UPDATE orders SET status='CANCELLED', remoteState='CANCELLED', updatedAt=? WHERE id=?`).run(Date.now(), orderId);
+            }
+            const responseMsg = JSON.stringify({ type: 'ORDER_UPDATE', id: payload.id, payload: { id: orderId, status: success ? 'CANCELLED' : 'ERROR' } });
+            connection.socket.send(responseMsg);
+          } catch (e: any) {
+            connection.socket.send(JSON.stringify({ type: 'ERROR', error: e.message, id: payload.id }));
           }
-          const responseMsg = JSON.stringify({ type: 'ORDER_UPDATE', id: payload.id, payload: { id: orderId, status: success ? 'CANCELLED' : 'ERROR' } });
-          if (payload.id) {
-            db.prepare(`INSERT INTO idempotency (requestId, response, createdAt) VALUES (?, ?, ?)`).run(payload.id, responseMsg, Date.now());
-          }
-          connection.socket.send(responseMsg);
         }
-        else if (payload.type === 'UPDATE_SETTINGS') {
+        else if (payload.type === 'CANCEL_ALL') {
           if (!isAuthenticated) return;
-          if (payload.payload.maxLoss) process.env.MAX_SESSION_LOSS = payload.payload.maxLoss;
-          if (payload.payload.maxProfit) process.env.MAX_SESSION_PROFIT = payload.payload.maxProfit;
+          try {
+            if (!adapter) throw new Error('Adapter not initialized');
+            await adapter.cancelAll();
+            db.prepare(`UPDATE orders SET status='CANCELLED', remoteState='CANCELLED', updatedAt=? WHERE status IN ('PENDING', 'OPEN', 'LIVE', 'NEW')`).run(Date.now());
+            connection.socket.send(JSON.stringify({ type: 'SNAPSHOT_REQUEST', id: payload.id }));
+          } catch (e: any) {
+            connection.socket.send(JSON.stringify({ type: 'ERROR', error: e.message, id: payload.id }));
+          }
         }
-        else if (payload.type === 'SUBSCRIBE_MARKET') {
+        else if (payload.type === 'SUBSCRIBE_MARKET' || payload.type === 'SELECT_MARKET') {
           if (!isAuthenticated) return;
           
           const validation = SubscribeMarketSchema.safeParse(payload.payload);
           if (!validation.success) {
-            connection.socket.send(JSON.stringify({ type: 'ERROR', error: 'Invalid market ID' }));
+            connection.socket.send(JSON.stringify({ type: 'ERROR', error: 'Invalid market subscription request' }));
             return;
           }
           
           activeMarketId = validation.data.conditionId;
-          adapter.subscribeToMarket(validation.data.conditionId, validation.data.yesTokenId, validation.data.noTokenId);
-          addRtdsSubscription([validation.data.yesTokenId, validation.data.noTokenId]);
+          const upToken = validation.data.upTokenId || validation.data.yesTokenId || '';
+          const downToken = validation.data.downTokenId || validation.data.noTokenId || '';
+          if (upToken && downToken && adapter) {
+            adapter.subscribeToMarket(validation.data.conditionId, upToken, downToken);
+            setActiveMarketAnchor(validation.data.conditionId, Date.now());
+          }
         }
       } catch (err: any) {
         connection.socket.send(JSON.stringify({ type: 'ERROR', error: err.message }));

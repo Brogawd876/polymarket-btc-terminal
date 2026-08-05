@@ -8,9 +8,9 @@
     "start:prod": "node -r dotenv/config dist/bundle.js",
     "dev": "ts-node-dev src/index.ts",
     "bundle": "esbuild src/index.ts --bundle --platform=node --target=node18 --outfile=dist/bundle.js --external:better-sqlite3 --external:*.node",
-    "lint": "echo lint",
+    "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "echo test",
+    "test": "vitest run",
     "public:diagnose": "ts-node-dev scripts/public-diagnose.ts",
     "live:diagnose": "ts-node-dev scripts/live-diagnose.ts",
     "live:smoke": "ts-node-dev scripts/live-smoke.ts",
@@ -37,6 +37,7 @@
     "@types/ws": "8.5.10",
     "esbuild": "0.28.1",
     "ts-node-dev": "2.0.0",
-    "typescript": "5.3.3"
+    "typescript": "5.3.3",
+    "vitest": "2.1.9"
   }
 }

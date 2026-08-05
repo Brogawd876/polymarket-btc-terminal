@@ -8,9 +8,6 @@ if (!fs.existsSync(dbDir)) {
 }
 const dbPath = path.join(dbDir, 'terminal.db');
 
-// When running inside a pkg executable, better-sqlite3's bindings library
-// cannot walk the virtual snapshot filesystem to find package.json.
-// We explicitly resolve the .node binary to sit next to the executable.
 function getDbOptions(): Database.Options {
   if ((process as any).pkg) {
     const nativeBinding = path.join(
@@ -48,18 +45,31 @@ export function setupDb() {
 
     CREATE TABLE IF NOT EXISTS orders (
       id TEXT PRIMARY KEY,
+      clientRequestId TEXT UNIQUE,
+      remoteOrderId TEXT,
+      conditionId TEXT,
       tokenId TEXT NOT NULL,
+      outcome TEXT,
       side TEXT NOT NULL,
+      dollarSpend TEXT,
       size TEXT NOT NULL,
       price TEXT NOT NULL,
+      presetId TEXT,
+      filledShares TEXT DEFAULT '0',
+      remainingShares TEXT,
+      averageFillPrice TEXT,
+      fees TEXT DEFAULT '0',
       status TEXT NOT NULL,
-      createdAt INTEGER NOT NULL
+      remoteState TEXT,
+      createdAt INTEGER NOT NULL,
+      updatedAt INTEGER NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS fills (
       id TEXT PRIMARY KEY,
       orderId TEXT NOT NULL,
       tokenId TEXT NOT NULL,
+      outcome TEXT,
       side TEXT NOT NULL,
       price TEXT NOT NULL,
       size TEXT NOT NULL,
@@ -70,8 +80,12 @@ export function setupDb() {
     
     CREATE TABLE IF NOT EXISTS positions (
       tokenId TEXT PRIMARY KEY,
+      conditionId TEXT,
+      outcome TEXT,
       netSize TEXT NOT NULL,
       avgPrice TEXT NOT NULL,
+      fees TEXT DEFAULT '0',
+      realizedPnl REAL DEFAULT 0,
       updatedAt INTEGER NOT NULL
     );
 
@@ -81,18 +95,29 @@ export function setupDb() {
       config TEXT NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS paper_balance (
-      id TEXT PRIMARY KEY,
-      balance TEXT NOT NULL,
-      updatedAt INTEGER NOT NULL
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS idempotency (
       requestId TEXT PRIMARY KEY,
-      response TEXT NOT NULL,
-      createdAt INTEGER NOT NULL
+      status TEXT NOT NULL, -- RESERVED, SUBMITTING, COMPLETED, FAILED, RECONCILING
+      response TEXT,
+      createdAt INTEGER NOT NULL,
+      updatedAt INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS anchors (
+      conditionId TEXT PRIMARY KEY,
+      windowStart INTEGER NOT NULL,
+      value TEXT NOT NULL,
+      sourceTimestamp INTEGER NOT NULL,
+      validated INTEGER NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_orders_tokenId ON orders(tokenId);
+    CREATE INDEX IF NOT EXISTS idx_orders_clientRequestId ON orders(clientRequestId);
     CREATE INDEX IF NOT EXISTS idx_fills_orderId ON fills(orderId);
   `);
   _db = db;

@@ -8,15 +8,7 @@ export default defineBackground(() => {
   let isAuthenticated = false;
 
   let currentToken = '';
-  let snapshotState = {
-    orders: [],
-    positions: [],
-    balance: 0,
-    settings: { maxLoss: '10', maxProfit: '150' }
-  };
-  let latestDiscovery: any[] = [];
-  let latestRtdsStatus: { connected: boolean } | null = null;
-  let latestRtdsUpdate: any | null = null;
+  let snapshotState: any = null;
 
   function startKeepAlive() {
     if (pingInterval) clearInterval(pingInterval);
@@ -34,7 +26,6 @@ export default defineBackground(() => {
 
   const messageQueue: any[] = [];
   const ports = new Set<chrome.runtime.Port>();
-  const replyHandlers = new Map<string, (response: any) => void>();
 
   chrome.runtime.onConnect.addListener((port) => {
     if (port.name === 'polybtc-ws') {
@@ -42,25 +33,36 @@ export default defineBackground(() => {
       port.onDisconnect.addListener(() => {
         ports.delete(port);
       });
+
       port.postMessage({ type: 'WS_STATUS', payload: isAuthenticated });
-      if (isAuthenticated) {
+      if (isAuthenticated && snapshotState) {
         port.postMessage({ type: 'WS_EVENT', payload: { type: 'SNAPSHOT', payload: snapshotState } });
-        if (latestDiscovery.length > 0) {
-          port.postMessage({ type: 'WS_EVENT', payload: { type: 'DISCOVERY_UPDATE', payload: latestDiscovery } });
-        }
-        if (latestRtdsStatus) {
-          port.postMessage({ type: 'WS_EVENT', payload: { type: 'RTDS_STATUS', payload: latestRtdsStatus } });
-        }
-        if (latestRtdsUpdate) {
-          port.postMessage({ type: 'WS_EVENT', payload: { type: 'RTDS_UPDATE', payload: latestRtdsUpdate } });
-        }
       }
+
+      port.onMessage.addListener((message) => {
+        if (message.type === 'SEND_WS' && message.payload) {
+          sendWsMessage(message.payload);
+        }
+      });
     }
   });
 
   const broadcast = (message: any) => {
     for (const port of ports) {
-      port.postMessage(message);
+      try {
+        port.postMessage(message);
+      } catch (e) {
+        ports.delete(port);
+      }
+    }
+  };
+
+  const sendWsMessage = (payload: any) => {
+    const payloadWithId = { ...payload, id: payload.id || crypto.randomUUID() };
+    if (ws && ws.readyState === WebSocket.OPEN && isAuthenticated) {
+      ws.send(JSON.stringify(payloadWithId));
+    } else {
+      messageQueue.push(payloadWithId);
     }
   };
 
@@ -94,13 +96,6 @@ export default defineBackground(() => {
     ws.onmessage = (event) => {
       try {
         const parsed = JSON.parse(event.data);
-        
-        if (parsed.id && replyHandlers.has(parsed.id)) {
-           const handler = replyHandlers.get(parsed.id)!;
-           handler(parsed);
-           replyHandlers.delete(parsed.id);
-        }
-
         const validation = WsEventSchema.safeParse(parsed);
         if (validation.success) {
           const data = validation.data;
@@ -113,27 +108,16 @@ export default defineBackground(() => {
             currentToken = ''; 
             ws?.close();
           } else if (data.type === 'SNAPSHOT') {
-            snapshotState = data.payload as any;
+            snapshotState = data.payload;
             broadcast({ type: 'WS_EVENT', payload: data });
             while(messageQueue.length > 0) {
               ws?.send(JSON.stringify(messageQueue.shift()));
             }
-          } else if (data.type === 'DISCOVERY_UPDATE') {
-            latestDiscovery = data.payload as any[];
-            broadcast({ type: 'WS_EVENT', payload: data });
-          } else if (data.type === 'RTDS_STATUS') {
-            latestRtdsStatus = data.payload as { connected: boolean };
-            broadcast({ type: 'WS_EVENT', payload: data });
-          } else if (data.type === 'RTDS_UPDATE') {
-            latestRtdsUpdate = data.payload;
-            latestRtdsStatus = { connected: true };
-            broadcast({ type: 'WS_EVENT', payload: data });
           } else {
             broadcast({ type: 'WS_EVENT', payload: data });
           }
         } else {
-          console.error('WS validation failed for payload:', parsed, validation.error);
-          broadcast({ type: 'DEBUG_ERROR', payload: { parsed, error: validation.error } });
+          broadcast({ type: 'WS_EVENT', payload: parsed });
         }
       } catch (e) {
         console.error('Failed to parse WS message', e);
@@ -153,26 +137,11 @@ export default defineBackground(() => {
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!sender.id || sender.id !== chrome.runtime.id) return;
-    
-    if (message.type === 'SEND_WS') {
-      if (!message.payload || typeof message.payload.type !== 'string') return;
-      
-      const payloadWithId = { ...message.payload, id: crypto.randomUUID() };
-
-      if (ws && ws.readyState === WebSocket.OPEN && isAuthenticated) {
-        ws.send(JSON.stringify(payloadWithId));
-      } else {
-        messageQueue.push(payloadWithId);
-      }
-      
-      replyHandlers.set(payloadWithId.id, (response) => {
-        sendResponse(response);
-      });
-      return true;
+    if (message.type === 'SEND_WS' && message.payload) {
+      sendWsMessage(message.payload);
+      sendResponse({ status: 'queued' });
     } else if (message.type === 'GET_WS_STATUS') {
       sendResponse({ connected: isAuthenticated });
-    } else if (message.type === 'GET_SNAPSHOT') {
-      sendResponse({ snapshot: snapshotState });
     }
   });
 });

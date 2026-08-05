@@ -13,6 +13,7 @@ test-results/
 # Data
 data/*.sqlite
 data/*.sqlite-journal
+data/*.db*
 logs/*.log
 !data/.gitkeep
 !logs/.gitkeep

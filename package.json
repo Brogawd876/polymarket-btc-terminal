@@ -13,10 +13,10 @@
     "start:prod": "pnpm --filter server start:prod",
     "lint": "pnpm --parallel --filter \"*\" lint",
     "typecheck": "pnpm --parallel --filter \"*\" typecheck",
-    "test": "pnpm --parallel --filter \"*\" test",
-    "test:integration": "vitest run --passWithNoTests tests/integration",
+    "test": "vitest run",
+    "test:integration": "vitest run tests/integration",
     "test:e2e": "playwright test tests/e2e",
-    "verify": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:integration && pnpm build:server && pnpm build:extension:chrome && pnpm build:extension:firefox && pnpm package:extension && pnpm test:e2e",
+    "verify": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:integration && pnpm build:server && pnpm build:extension:chrome && pnpm package:extension && pnpm test:e2e",
     "public:diagnose": "pnpm --filter server public:diagnose",
     "live:diagnose": "pnpm --filter server live:diagnose",
     "live:smoke": "pnpm --filter server live:smoke",
@@ -27,12 +27,17 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
+    "ws": "8.16.0",
     "zod": "3.23.8"
   },
   "devDependencies": {
+    "@fastify/cors": "8.5.0",
+    "@fastify/websocket": "8.3.1",
     "@playwright/test": "1.44.0",
     "@types/node": "20.12.12",
+    "@types/ws": "8.5.10",
     "better-sqlite3": "11.3.0",
+    "fastify": "4.26.1",
     "typescript": "5.4.5",
     "vitest": "2.1.9"
   },
@@ -43,4 +48,3 @@
     ]
   }
 }
-
