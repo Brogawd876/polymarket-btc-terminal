@@ -12,7 +12,7 @@ interface Props {
 }
 
 const TradingPanel: React.FC<Props> = ({ marketInfo, discoveredMarkets = [], sendMessage, orders = [], rtdsMetrics, balance = 0 }) => {
-  const [size, setSize] = useState('100');
+  const [size, setSize] = useState('');
   const [price, setPrice] = useState('0.50');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -20,6 +20,7 @@ const TradingPanel: React.FC<Props> = ({ marketInfo, discoveredMarkets = [], sen
   const [countdown, setCountdown] = useState<string>('');
   const [presets, setPresets] = useState<PresetConfig[]>([]);
   const [activeSide, setActiveSide] = useState<'YES'|'NO'>('YES');
+  const [autoSizeFromBalance, setAutoSizeFromBalance] = useState(true);
 
   useEffect(() => {
     fetch('http://localhost:3001/api/v1/presets')
@@ -49,6 +50,11 @@ const TradingPanel: React.FC<Props> = ({ marketInfo, discoveredMarkets = [], sen
   useEffect(() => {
     setIsSubmitting(false);
   }, [orders]);
+
+  useEffect(() => {
+    if (!autoSizeFromBalance || balance <= 0) return;
+    setSize(formatUsdSize(balance));
+  }, [autoSizeFromBalance, balance]);
 
   useEffect(() => {
     const currentMarket = discoveredMarkets.find(m => m.type === 'CURRENT');
@@ -92,6 +98,17 @@ const TradingPanel: React.FC<Props> = ({ marketInfo, discoveredMarkets = [], sen
         price: overridePrice || price
       }
     });
+  };
+
+  const updateManualSize = (value: string) => {
+    setAutoSizeFromBalance(false);
+    setSize(value);
+  };
+
+  const setSizeFromBalancePercent = (pct: string) => {
+    const pctVal = parseFloat(pct) / 100;
+    setAutoSizeFromBalance(false);
+    setSize(formatUsdSize(balance * pctVal));
   };
 
   const getPresetPrice = (preset: PresetConfig, tokenId: string) => {
@@ -194,7 +211,8 @@ const TradingPanel: React.FC<Props> = ({ marketInfo, discoveredMarkets = [], sen
           <input 
             type="number" 
             value={size} 
-            onChange={e => setSize(e.target.value)}
+            placeholder={balance > 0 ? formatUsdSize(balance) : '0.00'}
+            onChange={e => updateManualSize(e.target.value)}
             className="bg-gray-800 border border-gray-700 rounded p-1 text-white outline-none focus:border-blue-500"
             disabled={isSubmitting}
           />
@@ -203,8 +221,7 @@ const TradingPanel: React.FC<Props> = ({ marketInfo, discoveredMarkets = [], sen
               <button 
                 key={pct} 
                 onClick={() => {
-                  const pctVal = parseFloat(pct) / 100;
-                  setSize((balance * pctVal).toFixed(2));
+                  setSizeFromBalancePercent(pct);
                 }} 
                 className="flex-1 bg-gray-700 hover:bg-gray-600 text-[10px] py-1 rounded"
               >
@@ -281,5 +298,10 @@ const TradingPanel: React.FC<Props> = ({ marketInfo, discoveredMarkets = [], sen
     </div>
   );
 };
+
+function formatUsdSize(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '';
+  return Math.min(value, 1000).toFixed(2);
+}
 
 export default TradingPanel;

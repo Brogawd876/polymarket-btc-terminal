@@ -80,6 +80,34 @@ export function useWebSocket(url: string) {
     return () => port.disconnect();
   }, []);
 
+  useEffect(() => {
+    if (!connected) return;
+
+    let cancelled = false;
+
+    const refreshBalance = async () => {
+      try {
+        const res = await fetch('http://127.0.0.1:3001/api/balance');
+        if (!res.ok) return;
+
+        const data = await res.json();
+        if (!cancelled && typeof data.balance === 'number') {
+          setBalance(data.balance);
+        }
+      } catch {
+        // Balance is also provided by snapshots; ignore transient polling failures.
+      }
+    };
+
+    refreshBalance();
+    const interval = setInterval(refreshBalance, 5000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [connected]);
+
   const sendMessage = useCallback((msg: any) => {
     chrome.runtime.sendMessage({ type: 'SEND_WS', payload: msg })?.catch(() => {});
   }, []);
