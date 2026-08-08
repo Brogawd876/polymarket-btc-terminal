@@ -68,6 +68,7 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
       });
 
       const creds = await this.clobClient.createOrDeriveApiKey();
+      console.log('Derived creds:', creds);
       this.clobClient = new ClobClient({
         host: 'https://clob.polymarket.com',
         chain: 137,
@@ -153,11 +154,14 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
   }
 
   private connectUserWs(creds: any) {
-    const timestamp = Math.floor(Date.now() / 1000).toString();
-    const sigString = `${timestamp}GET/ws/user`;
-    const signature = crypto.createHmac('sha256', Buffer.from(creds.secret, 'base64'))
-                            .update(sigString)
-                            .digest('base64');
+    const timestamp = Date.now().toString();
+    const sigString = `${timestamp}GET/ws`;
+    const normalizedSecret = creds.secret.replace(/-/g, '+').replace(/_/g, '/');
+    const signature = crypto.createHmac('sha256', Buffer.from(normalizedSecret, 'base64'))
+        .update(sigString)
+        .digest('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_');
                             
     this.wsUser = new WebSocket('wss://ws-subscriptions-clob.polymarket.com/ws/user');
     this.wsUser.on('open', () => {
@@ -166,7 +170,6 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
           assets: ["user"],
           type: "auth",
           key: creds.key,
-          secret: creds.secret,
           passphrase: creds.passphrase,
           timestamp: timestamp,
           signature: signature

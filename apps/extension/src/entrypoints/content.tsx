@@ -3,11 +3,11 @@ import { createShadowRootUi } from 'wxt/client';
 import ReactDOM from 'react-dom/client';
 import React from 'react';
 import App from '../components/App';
-import tailwindCss from '../assets/tailwind.css?inline';
+import '../assets/tailwind.css';
 
 export default defineContentScript({
   matches: ['*://*.polymarket.com/*', '*://polymarket.com/*'],
-  cssInjectionMode: 'manifest',
+  cssInjectionMode: 'ui',
   async main(ctx: any) {
     console.log('PolyBTC Terminal: Content script injected and running!');
     const ui = await createShadowRootUi(ctx, {
@@ -18,12 +18,6 @@ export default defineContentScript({
       zIndex: 2147483647,
       onMount: (container: HTMLElement) => {
         const shadowRoot = container.getRootNode();
-        if (shadowRoot instanceof ShadowRoot && 'adoptedStyleSheets' in shadowRoot) {
-          const stylesheet = new CSSStyleSheet();
-          stylesheet.replaceSync(tailwindCss);
-          shadowRoot.adoptedStyleSheets = [...shadowRoot.adoptedStyleSheets, stylesheet];
-        }
-
         if (shadowRoot instanceof ShadowRoot && shadowRoot.host instanceof HTMLElement) {
           shadowRoot.host.style.position = 'fixed';
           shadowRoot.host.style.inset = '0';

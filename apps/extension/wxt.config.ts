@@ -13,7 +13,7 @@ export default defineConfig({
     host_permissions: ['*://*.polymarket.com/*', '*://polymarket.com/*', 'http://localhost/*', 'ws://localhost/*']
   },
   vite: () => ({
-    plugins: [react()],
+    plugins: [react({ fastRefresh: false })],
     build: {
       sourcemap: false
     },
