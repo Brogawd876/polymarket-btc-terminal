@@ -577,8 +577,31 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
     
     const p = parseFloat(price);
     const s = parseFloat(size);
-    const roundedPrice = Math.round(p / tickSize) * tickSize;
+    let targetPrice = Math.round(p / tickSize) * tickSize;
     const roundedSize = Math.round(s / tickSize) * tickSize;
+
+    try {
+      const liveBook = await this.clobClient.getOrderBook(tokenId);
+      const liveBid = this.getBestBid(Array.isArray((liveBook as any).bids) ? (liveBook as any).bids : []);
+      const liveAsk = this.getBestAsk(Array.isArray((liveBook as any).asks) ? (liveBook as any).asks : []);
+      const bestBid = parseFloat(liveBid);
+      const bestAsk = parseFloat(liveAsk);
+
+      if (side === 'BUY' && Number.isFinite(bestAsk) && bestAsk > 0 && targetPrice >= bestAsk) {
+        targetPrice = bestAsk - tickSize;
+        console.log(`Adjusted post-only BUY price from ${price} to ${targetPrice.toFixed(precision)} to avoid crossing ask ${liveAsk}`);
+      } else if (side === 'SELL' && Number.isFinite(bestBid) && bestBid > 0 && targetPrice <= bestBid) {
+        targetPrice = bestBid + tickSize;
+        console.log(`Adjusted post-only SELL price from ${price} to ${targetPrice.toFixed(precision)} to avoid crossing bid ${liveBid}`);
+      }
+    } catch (e) {
+      console.warn('Could not refresh orderbook before post-only placement; using requested price.');
+    }
+
+    const roundedPrice = Math.round(targetPrice / tickSize) * tickSize;
+    if (roundedPrice < tickSize || roundedPrice > 1 - tickSize) {
+      throw new TradingError(`Post-only price ${roundedPrice.toFixed(precision)} is outside valid range`, 'INVALID_POST_ONLY_PRICE');
+    }
 
     const orderArgs = {
       tokenID: tokenId,
