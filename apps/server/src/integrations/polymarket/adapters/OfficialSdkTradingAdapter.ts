@@ -26,6 +26,7 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
   private conditionTokens: Map<string, { upTokenId: string, downTokenId: string }> = new Map();
   private tokenToCondition: Map<string, string> = new Map();
   private orderbooks: Map<string, { bids: any[], asks: any[] }> = new Map();
+  private restOrderbookRefreshTimes: Map<string, number> = new Map();
 
   constructor() {
     super();
@@ -391,14 +392,14 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
     let upPrice = '0.50', downPrice = '0.50';
     
     if (upOb) {
-      upBid = upOb.bids.length > 0 ? upOb.bids[0].price : '0';
-      upAsk = upOb.asks.length > 0 ? upOb.asks[0].price : '0';
+      upBid = this.getBestBid(upOb.bids);
+      upAsk = this.getBestAsk(upOb.asks);
       upPrice = upBid !== '0' ? upBid : (upAsk !== '0' ? upAsk : '0.50');
     }
     
     if (downOb) {
-      downBid = downOb.bids.length > 0 ? downOb.bids[0].price : '0';
-      downAsk = downOb.asks.length > 0 ? downOb.asks[0].price : '0';
+      downBid = this.getBestBid(downOb.bids);
+      downAsk = this.getBestAsk(downOb.asks);
       downPrice = downBid !== '0' ? downBid : (downAsk !== '0' ? downAsk : '0.50');
     }
     
@@ -431,6 +432,28 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
       noAsk: downAsk,
       lastUpdated: Date.now()
     } as MarketState);
+  }
+
+  private getBestBid(levels: any[]): string {
+    return this.getBestPrice(levels, 'bid');
+  }
+
+  private getBestAsk(levels: any[]): string {
+    return this.getBestPrice(levels, 'ask');
+  }
+
+  private getBestPrice(levels: any[], side: 'bid' | 'ask'): string {
+    if (!Array.isArray(levels) || levels.length === 0) return '0';
+
+    let best = side === 'bid' ? -Infinity : Infinity;
+    for (const level of levels) {
+      const price = parseFloat(String(level?.price || '0'));
+      const size = parseFloat(String(level?.size || '0'));
+      if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(size) || size <= 0) continue;
+      if (side === 'bid' ? price > best : price < best) best = price;
+    }
+
+    return Number.isFinite(best) ? best.toFixed(2) : '0';
   }
 
   private handleFill(fill: any) {
@@ -618,12 +641,42 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
   }
 
   async getMarketState(conditionId: string): Promise<any> {
+    await this.refreshMarketOrderbooks(conditionId);
     const state = this.marketCache.get(conditionId);
     if (!state) return null;
     if (Date.now() - state.lastUpdated > 10000) {
       return { ...state, stale: true };
     }
     return state;
+  }
+
+  private async refreshMarketOrderbooks(conditionId: string): Promise<void> {
+    const lastRefresh = this.restOrderbookRefreshTimes.get(conditionId) || 0;
+    if (Date.now() - lastRefresh < 1500) return;
+
+    const tokens = this.conditionTokens.get(conditionId);
+    if (!tokens || !this.clobClient) return;
+
+    this.restOrderbookRefreshTimes.set(conditionId, Date.now());
+    try {
+      const [upBook, downBook] = await Promise.all([
+        this.clobClient.getOrderBook(tokens.upTokenId),
+        this.clobClient.getOrderBook(tokens.downTokenId),
+      ]);
+
+      this.orderbooks.set(tokens.upTokenId, {
+        bids: Array.isArray((upBook as any).bids) ? (upBook as any).bids : [],
+        asks: Array.isArray((upBook as any).asks) ? (upBook as any).asks : [],
+      });
+      this.orderbooks.set(tokens.downTokenId, {
+        bids: Array.isArray((downBook as any).bids) ? (downBook as any).bids : [],
+        asks: Array.isArray((downBook as any).asks) ? (downBook as any).asks : [],
+      });
+
+      this.updateMarketStateFromOrderbooks(conditionId);
+    } catch (err) {
+      console.warn(`Failed to refresh CLOB orderbook for ${conditionId}:`, err);
+    }
   }
 
   async getBalance(): Promise<number> {

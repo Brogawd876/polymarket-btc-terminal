@@ -64,9 +64,10 @@ const TradingPanel: React.FC<Props> = ({
   const activePosition = positions.find(p => p.tokenId === activeTokenId);
   const availableShares = activePosition ? parseFloat(activePosition.netSize || activePosition.netShares || '0') : 0;
   const walletBalance = Number.isFinite(balance) ? Math.max(0, balance) : 0;
-  const maxBuySpend = walletBalance.toFixed(2);
+  const maxSpendCents = Math.floor(walletBalance * 100) / 100;
+  const maxBuySpend = maxSpendCents.toFixed(2);
   const buySpendNum = parseFloat(buyUsdSpend) || 0;
-  const hasEnoughBalance = walletBalance > 0 && buySpendNum > 0 && buySpendNum <= walletBalance;
+  const hasEnoughBalance = maxSpendCents > 0 && buySpendNum > 0 && buySpendNum <= maxSpendCents;
   const minimumOrderSize = parseFloat(marketInfo?.minimumOrderSize || '0') || 0;
 
   useEffect(() => {
@@ -89,12 +90,12 @@ const TradingPanel: React.FC<Props> = ({
   }, [orders]);
 
   useEffect(() => {
-    if (walletBalance <= 0) return;
+    if (maxSpendCents <= 0) return;
     const selectedSpend = parseFloat(buyUsdSpend);
-    if (Number.isFinite(selectedSpend) && selectedSpend > walletBalance) {
+    if (Number.isFinite(selectedSpend) && selectedSpend > maxSpendCents) {
       setBuyUsdSpend(maxBuySpend);
     }
-  }, [buyUsdSpend, maxBuySpend, walletBalance]);
+  }, [buyUsdSpend, maxBuySpend, maxSpendCents]);
 
   const handleArmLive = () => {
     sendMessage({ type: 'ARM_LIVE', payload: { durationSeconds: 300 } });
@@ -325,7 +326,7 @@ const TradingPanel: React.FC<Props> = ({
             <button
               key={usd}
               onClick={() => setBuyUsdSpend(usd)}
-              disabled={parseFloat(usd) > walletBalance}
+              disabled={parseFloat(usd) > maxSpendCents}
               className={`flex-1 py-1 rounded text-xs font-mono border ${
                 buyUsdSpend === usd ? 'bg-green-800 border-green-500 text-white font-bold' : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'
               }`}
@@ -335,7 +336,7 @@ const TradingPanel: React.FC<Props> = ({
           ))}
           <button
             onClick={() => setBuyUsdSpend(maxBuySpend)}
-            disabled={walletBalance <= 0}
+            disabled={maxSpendCents <= 0}
             className={`flex-1 py-1 rounded text-xs font-mono border ${
               buyUsdSpend === maxBuySpend ? 'bg-green-800 border-green-500 text-white font-bold' : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'
             } disabled:opacity-40 disabled:hover:bg-gray-700`}
