@@ -9,7 +9,7 @@ import type {
   Position, 
   Outcome 
 } from '@polymarket-btc/shared';
-import { ShieldCheck, ShieldAlert, AlertTriangle, Play, Square } from 'lucide-react';
+import { AlertTriangle, Play, Square } from 'lucide-react';
 
 interface Props {
   operationalState: OperationalState;
@@ -22,6 +22,8 @@ interface Props {
   presets?: PresetConfig[];
   rtdsMetrics?: any;
   balance?: number;
+  backendError?: string;
+  clearBackendError?: () => void;
 }
 
 const DEFAULT_PRESETS: PresetConfig[] = [
@@ -48,7 +50,9 @@ const TradingPanel: React.FC<Props> = ({
   positions = [],
   presets = DEFAULT_PRESETS, 
   rtdsMetrics, 
-  balance = 0 
+  balance = 0,
+  backendError = '',
+  clearBackendError
 }) => {
   const [buyUsdSpend, setBuyUsdSpend] = useState<string>('25');
   const [sellShares, setSellShares] = useState<string>('');
@@ -97,6 +101,23 @@ const TradingPanel: React.FC<Props> = ({
     }
   }, [buyUsdSpend, maxBuySpend, maxSpendCents]);
 
+  useEffect(() => {
+    if (backendError) setIsSubmitting(false);
+  }, [backendError]);
+
+  const formatMarketTime = (timestamp?: number) => {
+    if (!timestamp) return '';
+    return new Date(timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  };
+
+  const getMarketLabel = (market: MarketState) => {
+    const time = formatMarketTime(market.targetTime);
+    const type = market.type || 'MARKET';
+    return time ? `${type} ${time}` : type;
+  };
+
+  const selectableMarkets = discoveredMarkets.filter(m => m.type !== 'PREVIOUS' && m.status !== 'CLOSED' && m.status !== 'RESOLVING');
+
   const handleArmLive = () => {
     sendMessage({ type: 'ARM_LIVE', payload: { durationSeconds: 300 } });
   };
@@ -108,6 +129,7 @@ const TradingPanel: React.FC<Props> = ({
   const handlePlaceOrder = (side: Side, capturedPrice: string, capturedSize: string, capturedUsd?: string) => {
     if (!activeTokenId) return;
     setError('');
+    clearBackendError?.();
     setIsSubmitting(true);
     sendMessage({
       type: 'PLACE_ORDER',
@@ -197,7 +219,7 @@ const TradingPanel: React.FC<Props> = ({
               disabled={Boolean(readiness && readiness.blockingReasons.filter(r => r !== 'LIVE EXECUTION DISARMED').length > 0)}
               className="flex items-center gap-1 bg-green-700 hover:bg-green-600 disabled:opacity-50 text-white text-[10px] px-2.5 py-1 rounded font-bold uppercase tracking-wider"
             >
-              <Play size={12} /> HOLD TO ARM LIVE
+              <Play size={12} /> ARM LIVE
             </button>
           )}
         </div>
@@ -216,9 +238,9 @@ const TradingPanel: React.FC<Props> = ({
       </div>
 
       {/* Discovered Markets Selector */}
-      {discoveredMarkets.length > 0 && (
+      {selectableMarkets.length > 0 && (
         <div className="flex gap-1.5 overflow-x-auto pb-1">
-          {discoveredMarkets.map(m => (
+          {selectableMarkets.map(m => (
             <button
               key={m.marketId}
               onClick={() => {
@@ -238,10 +260,11 @@ const TradingPanel: React.FC<Props> = ({
                   ? 'bg-blue-900 border-blue-500 text-white font-bold' 
                   : 'bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700'
               }`}
+              title={`${m.type || 'MARKET'}: ${m.title || m.marketId}${m.targetTime ? `, ends ${formatMarketTime(m.targetTime)}` : ''}`}
             >
               {m.type === 'CURRENT' && <span className="text-green-400 font-bold mr-1">•</span>}
               {m.type === 'NEXT' && <span className="text-yellow-400 font-bold mr-1">•</span>}
-              {m.title ? m.title.substring(0, 18) : m.marketId.substring(0, 8)}
+              {getMarketLabel(m)}
             </button>
           ))}
         </div>
@@ -327,7 +350,7 @@ const TradingPanel: React.FC<Props> = ({
               key={usd}
               onClick={() => setBuyUsdSpend(usd)}
               disabled={parseFloat(usd) > maxSpendCents}
-              className={`flex-1 py-1 rounded text-xs font-mono border ${
+              className={`flex-1 py-1 rounded text-xs font-mono border disabled:opacity-40 disabled:hover:bg-gray-700 ${
                 buyUsdSpend === usd ? 'bg-green-800 border-green-500 text-white font-bold' : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'
               }`}
             >
@@ -444,9 +467,9 @@ const TradingPanel: React.FC<Props> = ({
         </div>
       </div>
 
-      {error && (
+      {(error || backendError) && (
         <div className="bg-red-900/80 border border-red-500 text-red-200 p-2 rounded text-xs font-mono">
-          {error}
+          {error || backendError}
         </div>
       )}
     </div>

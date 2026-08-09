@@ -294,6 +294,10 @@ export async function registerRoutes(app: FastifyInstance) {
           const refreshedMarket = currentMarket && adapter
             ? await adapter.getMarketState(currentMarket.conditionId)
             : null;
+          const discoveredMarkets = globalDiscoveryService ? globalDiscoveryService.getMarkets() : [];
+          const snapshotMarkets = refreshedMarket
+            ? discoveredMarkets.map((market: any) => market.conditionId === refreshedMarket.conditionId ? refreshedMarket : market)
+            : discoveredMarkets;
 
           const orders = db.prepare(`SELECT * FROM orders WHERE status IN ('PENDING', 'OPEN', 'NEW', 'LIVE', 'SUBMITTING')`).all() as any[];
           const positions = db.prepare(`SELECT * FROM positions WHERE CAST(netSize AS REAL) > 0`).all() as any[];
@@ -313,7 +317,7 @@ export async function registerRoutes(app: FastifyInstance) {
               readiness,
               account,
               market: refreshedMarket || currentMarket,
-              markets: globalDiscoveryService ? globalDiscoveryService.getMarkets() : [],
+              markets: snapshotMarkets,
               anchor,
               orders,
               positions,

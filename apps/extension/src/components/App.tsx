@@ -22,6 +22,8 @@ const App: React.FC = () => {
     realizedPnl, 
     rtdsPrice, 
     rtdsMetrics, 
+    lastError,
+    clearLastError,
     sendMessage 
   } = useWebSocket('ws://127.0.0.1:3001/ws');
 
@@ -33,14 +35,14 @@ const App: React.FC = () => {
     <div style={{ pointerEvents: 'auto' }} className={`fixed bottom-4 right-4 bg-gray-900 text-white rounded-lg shadow-2xl overflow-hidden flex flex-col transition-all duration-300 ${minimized ? 'w-[260px] h-[42px]' : expanded ? 'w-[420px] h-[750px]' : 'w-[360px] h-[580px]'}`}>
       {/* Header */}
       <div className="flex items-center justify-between p-2.5 bg-gray-800 border-b border-gray-700 font-mono">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 min-w-0">
           <div className={`w-2.5 h-2.5 rounded-full ${
             operationalState === 'LIVE_ARMED' ? 'bg-green-500' :
             operationalState === 'LIVE_DISARMED' ? 'bg-yellow-500' :
             operationalState === 'READ_ONLY' ? 'bg-blue-500' : 'bg-red-500'
           }`} />
-          <span className="font-bold text-xs">BTC 5M TERMINAL</span>
-          {rtdsPrice && (
+          <span className="font-bold text-xs truncate">{minimized ? 'BTC 5M' : 'BTC 5M TERMINAL'}</span>
+          {!minimized && rtdsPrice && (
             <span className="text-[10px] text-yellow-400">BTC: ${rtdsPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
           )}
         </div>
@@ -81,6 +83,8 @@ const App: React.FC = () => {
             presets={presets}
             rtdsMetrics={rtdsMetrics}
             balance={balance}
+            backendError={lastError}
+            clearBackendError={clearLastError}
           />
         )}
         {activeTab === 'orders' && <OrdersTab orders={orders} sendMessage={sendMessage} />}
@@ -93,8 +97,8 @@ const App: React.FC = () => {
               <div>Backend Connected: <span className={connected ? 'text-green-400' : 'text-red-400'}>{connected.toString()}</span></div>
               <div>Operational State: <span className="text-yellow-400 font-bold">{operationalState}</span></div>
               <div>Live Armed: <span className={readiness?.liveArmed ? 'text-green-400 font-bold' : 'text-red-400'}>{readiness?.liveArmed ? 'TRUE' : 'FALSE'}</span></div>
-              <div>Account Authenticated: <span>{account?.authenticated ? 'YES' : 'NO'}</span></div>
-              <div>User Stream Connected: <span>{account?.userStreamConnected ? 'YES' : 'NO'}</span></div>
+              <div>Account Authenticated: <span>{(readiness?.accountAuthenticated ?? account?.authenticated) ? 'YES' : 'NO'}</span></div>
+              <div>User Stream Connected: <span>{readiness?.userStreamConnected ? 'YES' : 'NO'}</span></div>
             </div>
 
             <div className="bg-gray-800 p-2 rounded border border-gray-700 flex flex-col gap-1">

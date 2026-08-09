@@ -27,6 +27,7 @@ export function useWebSocket(url: string) {
   const [realizedPnl, setRealizedPnl] = useState<number>(0);
   const [rtdsPrice, setRtdsPrice] = useState<number | null>(null);
   const [rtdsMetrics, setRtdsMetrics] = useState<any>({ connected: false, stale: true, dataAgeMs: 0 });
+  const [lastError, setLastError] = useState<string>('');
 
   useEffect(() => {
     let port: chrome.runtime.Port;
@@ -44,6 +45,7 @@ export function useWebSocket(url: string) {
       } else if (message.type === 'WS_EVENT') {
         const data = message.payload;
         if (data.type === 'SNAPSHOT') {
+          setLastError('');
           if (data.payload.operationalState) setOperationalState(data.payload.operationalState);
           if (data.payload.readiness) setReadiness(data.payload.readiness);
           if (data.payload.account) setAccount(data.payload.account);
@@ -95,6 +97,7 @@ export function useWebSocket(url: string) {
           });
         }
         else if (data.type === 'ORDER_UPDATE' || data.type === 'ORDER_UPDATED') {
+          setLastError('');
           setOrders(prev => {
             const exists = prev.find(o => o.id === data.payload.id);
             if (exists) return prev.map(o => o.id === data.payload.id ? data.payload : o);
@@ -116,6 +119,9 @@ export function useWebSocket(url: string) {
           setAccount(data.payload);
           if (data.payload.collateralBalance !== undefined) setBalance(data.payload.collateralBalance);
         }
+        else if (data.type === 'ERROR') {
+          setLastError(data.payload?.message || data.error || 'Backend rejected the request.');
+        }
       }
     });
 
@@ -125,6 +131,8 @@ export function useWebSocket(url: string) {
   const sendMessage = useCallback((msg: any) => {
     chrome.runtime.sendMessage({ type: 'SEND_WS', payload: msg })?.catch(() => {});
   }, []);
+
+  const clearLastError = useCallback(() => setLastError(''), []);
 
   return { 
     connected, 
@@ -143,6 +151,8 @@ export function useWebSocket(url: string) {
     realizedPnl, 
     rtdsPrice, 
     rtdsMetrics, 
+    lastError,
+    clearLastError,
     sendMessage 
   };
 }
