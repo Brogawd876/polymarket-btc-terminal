@@ -63,6 +63,11 @@ const TradingPanel: React.FC<Props> = ({
 
   const activePosition = positions.find(p => p.tokenId === activeTokenId);
   const availableShares = activePosition ? parseFloat(activePosition.netSize || activePosition.netShares || '0') : 0;
+  const walletBalance = Number.isFinite(balance) ? Math.max(0, balance) : 0;
+  const maxBuySpend = walletBalance.toFixed(2);
+  const buySpendNum = parseFloat(buyUsdSpend) || 0;
+  const hasEnoughBalance = walletBalance > 0 && buySpendNum > 0 && buySpendNum <= walletBalance;
+  const minimumOrderSize = parseFloat(marketInfo?.minimumOrderSize || '0') || 0;
 
   useEffect(() => {
     if (!marketInfo?.targetTime) return;
@@ -82,6 +87,14 @@ const TradingPanel: React.FC<Props> = ({
   useEffect(() => {
     setIsSubmitting(false);
   }, [orders]);
+
+  useEffect(() => {
+    if (walletBalance <= 0) return;
+    const selectedSpend = parseFloat(buyUsdSpend);
+    if (Number.isFinite(selectedSpend) && selectedSpend > walletBalance) {
+      setBuyUsdSpend(maxBuySpend);
+    }
+  }, [buyUsdSpend, maxBuySpend, walletBalance]);
 
   const handleArmLive = () => {
     sendMessage({ type: 'ARM_LIVE', payload: { durationSeconds: 300 } });
@@ -312,6 +325,7 @@ const TradingPanel: React.FC<Props> = ({
             <button
               key={usd}
               onClick={() => setBuyUsdSpend(usd)}
+              disabled={parseFloat(usd) > walletBalance}
               className={`flex-1 py-1 rounded text-xs font-mono border ${
                 buyUsdSpend === usd ? 'bg-green-800 border-green-500 text-white font-bold' : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'
               }`}
@@ -319,6 +333,16 @@ const TradingPanel: React.FC<Props> = ({
               ${usd}
             </button>
           ))}
+          <button
+            onClick={() => setBuyUsdSpend(maxBuySpend)}
+            disabled={walletBalance <= 0}
+            className={`flex-1 py-1 rounded text-xs font-mono border ${
+              buyUsdSpend === maxBuySpend ? 'bg-green-800 border-green-500 text-white font-bold' : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'
+            } disabled:opacity-40 disabled:hover:bg-gray-700`}
+            title={`Use full available balance: $${maxBuySpend}`}
+          >
+            MAX
+          </button>
         </div>
         <div className="flex items-center gap-2">
           <label className="text-[10px] text-gray-400">Custom USD:</label>
@@ -330,6 +354,9 @@ const TradingPanel: React.FC<Props> = ({
             placeholder="Spend USD"
           />
         </div>
+        {!hasEnoughBalance && buySpendNum > 0 && (
+          <div className="text-[10px] text-yellow-300 font-mono">Spend must be between $0.01 and ${maxBuySpend}.</div>
+        )}
 
         {/* Dynamic BUY Price Buttons */}
         <div className="text-[10px] text-gray-400 font-bold pt-1 border-t border-gray-700">BUY {activeOutcome} MAKER PRESETS</div>
@@ -337,17 +364,18 @@ const TradingPanel: React.FC<Props> = ({
           {presets.filter(p => p.side === 'BUY' && p.active).map(preset => {
             const price = calculatePresetPrice(preset);
             const priceNum = price ? parseFloat(price) : 0.5;
-            const spendNum = parseFloat(buyUsdSpend) || 10;
-            const shares = priceNum > 0 ? (spendNum / priceNum).toFixed(1) : '0';
+            const shares = priceNum > 0 ? (buySpendNum / priceNum).toFixed(1) : '0';
+            const sharesNum = parseFloat(shares);
             const priceCents = price ? Math.round(parseFloat(price) * 100) : '-';
+            const meetsMinimumSize = minimumOrderSize <= 0 || sharesNum >= minimumOrderSize;
 
             return (
               <button
                 key={preset.id}
                 onPointerDown={() => price && handlePlaceOrder('BUY', price, shares, buyUsdSpend)}
-                disabled={isExecutionBlocked || !price || isSubmitting}
+                disabled={isExecutionBlocked || !price || isSubmitting || !hasEnoughBalance || !meetsMinimumSize}
                 className="bg-green-700 hover:bg-green-600 disabled:opacity-40 py-2 rounded text-center font-mono font-bold text-white border border-green-500/50 shadow flex flex-col items-center justify-center"
-                title={`${preset.name} - Est Shares: ${shares}`}
+                title={`${preset.name} - Est Shares: ${shares}${!meetsMinimumSize ? `; minimum ${minimumOrderSize} shares` : ''}`}
               >
                 <span className="text-sm">[{priceCents}¢]</span>
                 <span className="text-[9px] text-green-200 font-normal">(${buyUsdSpend})</span>
@@ -371,7 +399,8 @@ const TradingPanel: React.FC<Props> = ({
                 const calculated = (availableShares * (parseFloat(pct) / 100)).toFixed(1);
                 setSellShares(calculated);
               }}
-              className="flex-1 py-1 bg-gray-700 hover:bg-gray-600 border border-gray-600 rounded text-xs font-mono text-gray-300"
+              disabled={availableShares <= 0}
+              className="flex-1 py-1 bg-gray-700 hover:bg-gray-600 disabled:opacity-40 border border-gray-600 rounded text-xs font-mono text-gray-300"
             >
               {pct}%
             </button>
@@ -394,15 +423,17 @@ const TradingPanel: React.FC<Props> = ({
           {presets.filter(p => p.side === 'SELL' && p.active).map(preset => {
             const price = calculatePresetPrice(preset);
             const sharesToSell = sellShares || availableShares.toFixed(1);
+            const sharesToSellNum = parseFloat(sharesToSell) || 0;
             const priceCents = price ? Math.round(parseFloat(price) * 100) : '-';
+            const sellSizeValid = sharesToSellNum > 0 && sharesToSellNum <= availableShares && (minimumOrderSize <= 0 || sharesToSellNum >= minimumOrderSize);
 
             return (
               <button
                 key={preset.id}
-                onPointerDown={() => price && parseFloat(sharesToSell) > 0 && handlePlaceOrder('SELL', price, sharesToSell)}
-                disabled={isExecutionBlocked || !price || parseFloat(sharesToSell) <= 0 || isSubmitting}
+                onPointerDown={() => price && sellSizeValid && handlePlaceOrder('SELL', price, sharesToSell)}
+                disabled={isExecutionBlocked || !price || !sellSizeValid || isSubmitting}
                 className="bg-red-700 hover:bg-red-600 disabled:opacity-40 py-2 rounded text-center font-mono font-bold text-white border border-red-500/50 shadow flex flex-col items-center justify-center"
-                title={`${preset.name} - Shares: ${sharesToSell}`}
+                title={`${preset.name} - Shares: ${sharesToSell}${sharesToSellNum > availableShares ? '; exceeds held shares' : ''}${minimumOrderSize > 0 && sharesToSellNum < minimumOrderSize ? `; minimum ${minimumOrderSize} shares` : ''}`}
               >
                 <span className="text-sm">[{priceCents}¢]</span>
                 <span className="text-[9px] text-red-200 font-normal">({sharesToSell} sh)</span>

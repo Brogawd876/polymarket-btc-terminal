@@ -253,7 +253,12 @@ export const WsEventSchema = z.discriminatedUnion('type', [
 
   z.object({
     type: z.literal('MARKET_UPDATE'),
-    payload: MarketStateSchema,
+    payload: MarketStateSchema.extend({
+      operationalState: OperationalStateSchema.optional(),
+      readiness: LiveReadinessSchema.optional(),
+      positions: z.array(PositionSchema).optional(),
+      balance: z.number().optional(),
+    }),
   }).merge(BaseMessageSchema),
 
   z.object({

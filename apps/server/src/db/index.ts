@@ -22,7 +22,23 @@ function getDbOptions(): Database.Options {
 let _db: Database.Database | null = null;
 export function setupDb() {
   if (_db) return _db;
-  const db = new Database(dbPath, getDbOptions());
+  let db: Database.Database | null = null;
+  try {
+    db = new Database(dbPath, getDbOptions());
+    db.pragma('quick_check');
+  } catch (err: any) {
+    if (!String(err?.message || '').toLowerCase().includes('malformed')) throw err;
+    try { db?.close(); } catch {}
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const corruptPath = `${dbPath}.corrupt-${stamp}`;
+    if (fs.existsSync(dbPath)) fs.renameSync(dbPath, corruptPath);
+    for (const suffix of ['-wal', '-shm']) {
+      const sidecar = `${dbPath}${suffix}`;
+      if (fs.existsSync(sidecar)) fs.rmSync(sidecar, { force: true });
+    }
+    console.warn(`SQLite database was corrupt; moved it to ${corruptPath} and created a fresh database.`);
+    db = new Database(dbPath, getDbOptions());
+  }
   db.pragma('journal_mode = WAL');
   db.pragma('synchronous = NORMAL');
   db.pragma('busy_timeout = 5000');
@@ -120,6 +136,8 @@ export function setupDb() {
     CREATE INDEX IF NOT EXISTS idx_orders_clientRequestId ON orders(clientRequestId);
     CREATE INDEX IF NOT EXISTS idx_fills_orderId ON fills(orderId);
   `);
+  db.prepare(`UPDATE positions SET outcome = UPPER(outcome) WHERE outcome IN ('Up', 'Down')`).run();
+  db.prepare(`UPDATE orders SET outcome = UPPER(outcome) WHERE outcome IN ('Up', 'Down')`).run();
   _db = db;
   return db;
 }

@@ -9,6 +9,7 @@ export default defineBackground(() => {
 
   let currentToken = '';
   let snapshotState: any = null;
+  let lastMarketSubscription: any = null;
 
   function startKeepAlive() {
     if (pingInterval) clearInterval(pingInterval);
@@ -59,6 +60,9 @@ export default defineBackground(() => {
 
   const sendWsMessage = (payload: any) => {
     const payloadWithId = { ...payload, id: payload.id || crypto.randomUUID() };
+    if (payload.type === 'SUBSCRIBE_MARKET' || payload.type === 'SELECT_MARKET') {
+      lastMarketSubscription = payloadWithId;
+    }
     if (ws && ws.readyState === WebSocket.OPEN && isAuthenticated) {
       ws.send(JSON.stringify(payloadWithId));
     } else {
@@ -102,6 +106,9 @@ export default defineBackground(() => {
           if (data.type === 'AUTH_OK') {
             isAuthenticated = true;
             broadcast({ type: 'WS_STATUS', payload: true });
+            if (lastMarketSubscription) {
+              ws?.send(JSON.stringify({ ...lastMarketSubscription, id: crypto.randomUUID() }));
+            }
             ws?.send(JSON.stringify({ type: 'SNAPSHOT_REQUEST' }));
           } else if (data.type === 'AUTH_ERROR') {
             isAuthenticated = false;

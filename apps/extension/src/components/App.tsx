@@ -4,7 +4,7 @@ import TradingPanel from './TradingPanel';
 import OrdersTab from './OrdersTab';
 import PositionsTab from './PositionsTab';
 import SettingsTab from './SettingsTab';
-import { Maximize2, Minimize2 } from 'lucide-react';
+import { Maximize2, Minimize2, Minus } from 'lucide-react';
 
 const App: React.FC = () => {
   const { 
@@ -26,10 +26,11 @@ const App: React.FC = () => {
   } = useWebSocket('ws://127.0.0.1:3001/ws');
 
   const [expanded, setExpanded] = useState(false);
+  const [minimized, setMinimized] = useState(false);
   const [activeTab, setActiveTab] = useState<'trade' | 'orders' | 'positions' | 'settings' | 'diag'>('trade');
 
   return (
-    <div style={{ pointerEvents: 'auto' }} className={`fixed bottom-4 right-4 bg-gray-900 text-white rounded-lg shadow-2xl overflow-hidden flex flex-col transition-all duration-300 ${expanded ? 'w-[420px] h-[750px]' : 'w-[360px] h-[580px]'}`}>
+    <div style={{ pointerEvents: 'auto' }} className={`fixed bottom-4 right-4 bg-gray-900 text-white rounded-lg shadow-2xl overflow-hidden flex flex-col transition-all duration-300 ${minimized ? 'w-[260px] h-[42px]' : expanded ? 'w-[420px] h-[750px]' : 'w-[360px] h-[580px]'}`}>
       {/* Header */}
       <div className="flex items-center justify-between p-2.5 bg-gray-800 border-b border-gray-700 font-mono">
         <div className="flex items-center gap-2">
@@ -44,14 +45,17 @@ const App: React.FC = () => {
           )}
         </div>
         <div className="flex gap-2">
-          <button onClick={() => setExpanded(!expanded)} className="p-1 hover:bg-gray-700 rounded text-gray-400 hover:text-white">
+          <button onClick={() => setMinimized(!minimized)} className="p-1 hover:bg-gray-700 rounded text-gray-400 hover:text-white" title={minimized ? 'Restore panel' : 'Minimize panel'}>
+            <Minus size={14} />
+          </button>
+          <button onClick={() => { setMinimized(false); setExpanded(!expanded); }} className="p-1 hover:bg-gray-700 rounded text-gray-400 hover:text-white" title={expanded ? 'Compact panel' : 'Expand panel'}>
             {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
           </button>
         </div>
       </div>
 
       {/* Navigation */}
-      <div className="flex text-[10px] bg-gray-800 border-b border-gray-700 font-mono">
+      {!minimized && <div className="flex text-[10px] bg-gray-800 border-b border-gray-700 font-mono">
         {(['trade', 'orders', 'positions', 'settings', 'diag'] as const).map(tab => (
           <button 
             key={tab}
@@ -61,10 +65,10 @@ const App: React.FC = () => {
             {tab}
           </button>
         ))}
-      </div>
+      </div>}
 
       {/* Content Area */}
-      <div className="flex-1 overflow-y-auto p-3 bg-gray-900">
+      {!minimized && <div className="flex-1 overflow-y-auto p-3 bg-gray-900">
         {activeTab === 'trade' && (
           <TradingPanel
             operationalState={operationalState}
@@ -110,7 +114,7 @@ const App: React.FC = () => {
             </div>
           </div>
         )}
-      </div>
+      </div>}
     </div>
   );
 };

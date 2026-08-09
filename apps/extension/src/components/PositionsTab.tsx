@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import type { Position, MarketState } from '@polymarket-btc/shared';
 
 interface Props {
@@ -10,6 +10,11 @@ interface Props {
 
 const PositionsTab: React.FC<Props> = ({ positions = [], balance = 0, realizedPnl = 0, marketInfo }) => {
   const activePositions = positions.filter(p => parseFloat(p.netSize || p.netShares || '0') > 0);
+  const [scope, setScope] = useState<'current' | 'all'>('current');
+  const currentPositions = marketInfo
+    ? activePositions.filter(p => p.conditionId === marketInfo.conditionId || p.tokenId === marketInfo.upTokenId || p.tokenId === marketInfo.downTokenId || p.tokenId === marketInfo.yesTokenId || p.tokenId === marketInfo.noTokenId)
+    : [];
+  const visiblePositions = scope === 'current' ? currentPositions : activePositions;
 
   return (
     <div className="flex flex-col gap-3 text-xs font-sans">
@@ -26,13 +31,33 @@ const PositionsTab: React.FC<Props> = ({ positions = [], balance = 0, realizedPn
         </div>
       </div>
 
-      <div className="font-bold text-gray-200 uppercase tracking-wider px-1">POSITIONS ({activePositions.length})</div>
+      <div className="flex items-center justify-between px-1">
+        <div className="font-bold text-gray-200 uppercase tracking-wider">
+          {scope === 'current' ? 'CURRENT MARKET' : 'ALL POSITIONS'} ({visiblePositions.length})
+        </div>
+        <div className="flex gap-1 font-mono text-[10px]">
+          <button
+            onClick={() => setScope('current')}
+            className={`px-2 py-1 rounded border ${scope === 'current' ? 'bg-blue-700 border-blue-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400'}`}
+          >
+            CURRENT
+          </button>
+          <button
+            onClick={() => setScope('all')}
+            className={`px-2 py-1 rounded border ${scope === 'all' ? 'bg-blue-700 border-blue-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400'}`}
+          >
+            ALL
+          </button>
+        </div>
+      </div>
 
-      {activePositions.length === 0 ? (
-        <div className="text-center text-gray-500 py-8">No open positions</div>
+      {visiblePositions.length === 0 ? (
+        <div className="text-center text-gray-500 py-8">
+          {scope === 'current' ? 'No current-market position' : 'No open positions'}
+        </div>
       ) : (
         <div className="flex flex-col gap-2 font-mono">
-          {activePositions.map(pos => {
+          {visiblePositions.map(pos => {
             const isUp = marketInfo && (pos.tokenId === marketInfo.upTokenId || pos.tokenId === marketInfo.yesTokenId);
             const isDown = marketInfo && (pos.tokenId === marketInfo.downTokenId || pos.tokenId === marketInfo.noTokenId);
             const outcomeText = isUp ? 'UP' : isDown ? 'DOWN' : (pos.outcome || 'SHARES');

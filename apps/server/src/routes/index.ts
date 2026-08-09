@@ -212,11 +212,24 @@ export async function registerRoutes(app: FastifyInstance) {
     const intervalId = setInterval(async () => {
       if (activeMarketId) {
         try {
+          const db = getDb();
+          const globalDiscoveryService = (globalThis as any).discoveryService;
+          const currentMarket = globalDiscoveryService ? globalDiscoveryService.getCurrentMarket() : null;
           const state = adapter ? await adapter.getMarketState(activeMarketId) : null;
           if (state) {
+            const readiness = evaluateReadiness(currentMarket);
+            const operationalState = determineOperationalState(readiness, currentMarket);
+            const positions = db.prepare(`SELECT * FROM positions WHERE CAST(netSize AS REAL) > 0`).all() as any[];
+            const balance = adapter ? await adapter.getBalance() : 0;
             connection.socket.send(JSON.stringify({ 
               type: 'MARKET_UPDATE', 
-              payload: state 
+              payload: {
+                ...state,
+                readiness,
+                operationalState,
+                positions,
+                balance,
+              }
             }));
           }
         } catch (err) {
@@ -248,6 +261,18 @@ export async function registerRoutes(app: FastifyInstance) {
         if (payload.type === 'ARM_LIVE') {
           if (!isAuthenticated) return;
           const duration = payload.payload?.durationSeconds ? payload.payload.durationSeconds * 1000 : 300000;
+          const readinessBeforeArm = evaluateReadiness(currentMarket);
+          const blockersBeforeArm = readinessBeforeArm.blockingReasons.filter(reason => reason !== 'LIVE EXECUTION DISARMED');
+          if (blockersBeforeArm.length > 0) {
+            connection.socket.send(JSON.stringify({ type: 'READINESS_UPDATED', id: payload.id, payload: readinessBeforeArm }));
+            connection.socket.send(JSON.stringify({
+              type: 'ERROR',
+              id: payload.id,
+              payload: { message: `Cannot arm live trading: ${blockersBeforeArm.join('; ')}` },
+              error: `Cannot arm live trading: ${blockersBeforeArm.join('; ')}`
+            }));
+            return;
+          }
           armLive(duration);
           const readiness = evaluateReadiness(currentMarket);
           connection.socket.send(JSON.stringify({ type: 'READINESS_UPDATED', id: payload.id, payload: readiness }));
@@ -336,6 +361,48 @@ export async function registerRoutes(app: FastifyInstance) {
           }
 
           const { tokenId, outcome, side, dollarSpend, size, price, presetId } = validation.data;
+          const requestedShares = parseFloat(size);
+          const requestedPrice = parseFloat(price);
+          const requestedSpend = dollarSpend ? parseFloat(dollarSpend) : requestedShares * requestedPrice;
+          const minimumOrderSize = parseFloat(currentMarket?.minimumOrderSize || '0');
+
+          if (minimumOrderSize > 0 && requestedShares < minimumOrderSize) {
+            db.prepare(`UPDATE idempotency SET status='FAILED', updatedAt=? WHERE requestId=?`).run(Date.now(), requestId);
+            connection.socket.send(JSON.stringify({
+              type: 'ERROR',
+              payload: { message: `Order blocked: minimum size is ${minimumOrderSize} shares` },
+              error: `Order blocked: minimum size is ${minimumOrderSize} shares`,
+              id: requestId
+            }));
+            return;
+          }
+
+          if (side === 'BUY') {
+            const balance = adapter ? await adapter.getBalance() : 0;
+            if (!Number.isFinite(requestedSpend) || requestedSpend <= 0 || requestedSpend > balance) {
+              db.prepare(`UPDATE idempotency SET status='FAILED', updatedAt=? WHERE requestId=?`).run(Date.now(), requestId);
+              connection.socket.send(JSON.stringify({
+                type: 'ERROR',
+                payload: { message: `Order blocked: insufficient balance for $${requestedSpend.toFixed(2)} buy` },
+                error: `Order blocked: insufficient balance for $${requestedSpend.toFixed(2)} buy`,
+                id: requestId
+              }));
+              return;
+            }
+          } else {
+            const position = db.prepare(`SELECT netSize FROM positions WHERE tokenId = ?`).get(tokenId) as { netSize?: string } | undefined;
+            const availableShares = parseFloat(position?.netSize || '0');
+            if (!Number.isFinite(requestedShares) || requestedShares <= 0 || requestedShares > availableShares) {
+              db.prepare(`UPDATE idempotency SET status='FAILED', updatedAt=? WHERE requestId=?`).run(Date.now(), requestId);
+              connection.socket.send(JSON.stringify({
+                type: 'ERROR',
+                payload: { message: `Order blocked: only ${availableShares.toFixed(4)} shares available to sell` },
+                error: `Order blocked: only ${availableShares.toFixed(4)} shares available to sell`,
+                id: requestId
+              }));
+              return;
+            }
+          }
           
           try {
             db.prepare(`UPDATE idempotency SET status='SUBMITTING', updatedAt=? WHERE requestId=?`).run(Date.now(), requestId);
@@ -411,7 +478,10 @@ export async function registerRoutes(app: FastifyInstance) {
           const downToken = validation.data.downTokenId || validation.data.noTokenId || '';
           if (upToken && downToken && adapter) {
             adapter.subscribeToMarket(validation.data.conditionId, upToken, downToken);
-            setActiveMarketAnchor(validation.data.conditionId, Date.now());
+            const selectedMarket = globalDiscoveryService
+              ? globalDiscoveryService.getMarkets().find((market: any) => market.conditionId === validation.data.conditionId)
+              : null;
+            setActiveMarketAnchor(validation.data.conditionId, selectedMarket?.startTime || Date.now());
           }
         }
       } catch (err: any) {

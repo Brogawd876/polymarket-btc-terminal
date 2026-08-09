@@ -9,6 +9,7 @@ import { setupDb } from './db';
 import { registerRoutes } from './routes';
 import { createTradingAdapter } from './integrations/polymarket/adapters';
 import { DiscoveryService } from './integrations/polymarket/discovery';
+import { setActiveMarketAnchor } from './integrations/polymarket/rtds';
 import crypto from 'crypto';
 import type { TradingAdapter } from './integrations/polymarket/adapters/TradingAdapter';
 
@@ -47,6 +48,10 @@ export async function startServer() {
 
     discoveryService = new DiscoveryService((markets) => {
       markets.forEach(m => adapter.updateMarketDiscovery(m));
+      const currentMarket = markets.find(m => m.type === 'CURRENT');
+      if (currentMarket) {
+        setActiveMarketAnchor(currentMarket.conditionId, currentMarket.startTime || Date.now());
+      }
       for (const client of app.websocketServer.clients) {
         if (client.readyState === 1) {
            client.send(JSON.stringify({

@@ -1,7 +1,6 @@
 import { Order, MarketState, Side, OrderState, AccountState, Position } from '@polymarket-btc/shared';
 import { ethers } from 'ethers';
 import { AssetType, ClobClient, Side as ClobSide, OrderType } from '@polymarket/clob-client-v2';
-import crypto from 'crypto';
 import WebSocket from 'ws';
 import { getDb } from '../../../db/index';
 import { TradingAdapter } from './TradingAdapter';
@@ -21,6 +20,7 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
   private clobClient!: ClobClient;
   private wsUser?: WebSocket;
   private wsMarket?: WebSocket;
+  private userWsReconnectTimer: NodeJS.Timeout | null = null;
   private lastReconciliationTime: number = 0;
 
   private conditionTokens: Map<string, { upTokenId: string, downTokenId: string }> = new Map();
@@ -68,7 +68,7 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
       });
 
       const creds = await this.clobClient.createOrDeriveApiKey();
-      console.log('Derived creds:', creds);
+      console.log('Derived Polymarket API credentials.');
       this.clobClient = new ClobClient({
         host: 'https://clob.polymarket.com',
         chain: 137,
@@ -79,8 +79,12 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
       });
 
       await this.reconcileState(creds);
+      await this.reconcileRecentTrades();
       this.connectUserWs(creds);
       this.connectMarketWs();
+      this.pollInterval = setInterval(() => {
+        this.reconcileRecentTrades().catch(err => console.error('Trade reconciliation failed:', err));
+      }, 15000);
 
       this.isConnected = true;
       console.log('Polymarket Adapter Initialized.');
@@ -98,6 +102,10 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
       this.pollInterval = null;
+    }
+    if (this.userWsReconnectTimer) {
+      clearTimeout(this.userWsReconnectTimer);
+      this.userWsReconnectTimer = null;
     }
     if (this.wsUser) {
       this.wsUser.close();
@@ -153,27 +161,84 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
     }
   }
 
+  private async reconcileRecentTrades(): Promise<void> {
+    if (!this.clobClient) return;
+
+    try {
+      const trades = await this.clobClient.getTrades(undefined, true);
+      if (!Array.isArray(trades) || trades.length === 0) return;
+
+      for (const trade of trades as any[]) {
+        if (trade.status && !['CONFIRMED', 'MATCHED', 'MINED'].includes(String(trade.status).toUpperCase())) {
+          continue;
+        }
+
+        const makerOrder = this.findUserMakerOrder(trade);
+        const isMaker = String(trade.trader_side || '').toUpperCase() === 'MAKER' && makerOrder;
+        const orderId = isMaker ? makerOrder.order_id : trade.taker_order_id;
+        const side = String(isMaker ? makerOrder.side : trade.side || 'BUY').toUpperCase();
+        const size = String(isMaker ? makerOrder.matched_amount : trade.size || '0');
+
+        if (!orderId || !trade.asset_id || parseFloat(size) <= 0) continue;
+
+        const db = getDb();
+        const existingFill = db.prepare('SELECT id FROM fills WHERE id = ?').get(trade.id);
+        if (existingFill) continue;
+
+        this.handleFill({
+          id: trade.id,
+          order_id: orderId,
+          asset_id: trade.asset_id,
+          token_id: trade.asset_id,
+          market: trade.market,
+          conditionId: trade.market,
+          outcome: trade.outcome || makerOrder?.outcome,
+          side,
+          price: isMaker ? makerOrder.price : trade.price,
+          size,
+          fee: '0',
+          createdAt: this.parseTradeTimestamp(trade.match_time || trade.last_update)
+        });
+      }
+    } catch (err) {
+      console.error('Failed to reconcile recent trades:', err);
+    }
+  }
+
+  private findUserMakerOrder(trade: any): any | undefined {
+    const funder = (POLY_FUNDER_ADDRESS || '').toLowerCase();
+    const signer = (this.wallet?.address || '').toLowerCase();
+    return (trade.maker_orders || []).find((order: any) => {
+      const owner = String(order.owner || '').toLowerCase();
+      const maker = String(order.maker_address || '').toLowerCase();
+      return (funder && (owner === funder || maker === funder)) || (signer && (owner === signer || maker === signer));
+    });
+  }
+
+  private parseTradeTimestamp(value?: string): number {
+    if (!value) return Date.now();
+    const parsed = new Date(value).getTime();
+    return Number.isFinite(parsed) ? parsed : Date.now();
+  }
+
   private connectUserWs(creds: any) {
-    const timestamp = Date.now().toString();
-    const sigString = `${timestamp}GET/ws`;
-    const normalizedSecret = creds.secret.replace(/-/g, '+').replace(/_/g, '/');
-    const signature = crypto.createHmac('sha256', Buffer.from(normalizedSecret, 'base64'))
-        .update(sigString)
-        .digest('base64')
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_');
-                            
+    if (this.userWsReconnectTimer) {
+      clearTimeout(this.userWsReconnectTimer);
+      this.userWsReconnectTimer = null;
+    }
+
     this.wsUser = new WebSocket('wss://ws-subscriptions-clob.polymarket.com/ws/user');
     this.wsUser.on('open', () => {
        console.log('Connected to WS User channel');
        this.wsUser?.send(JSON.stringify({
-          assets: ["user"],
-          type: "auth",
-          key: creds.key,
-          passphrase: creds.passphrase,
-          timestamp: timestamp,
-          signature: signature
+          auth: {
+            apiKey: creds.key,
+            secret: creds.secret,
+            passphrase: creds.passphrase,
+          },
+          type: "user"
        }));
+       this.userStreamConnected = true;
     });
 
     this.wsUser.on('message', (data) => {
@@ -193,9 +258,12 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
        }
     });
 
-    this.wsUser.on('close', () => {
+    this.wsUser.on('close', (code, reason) => {
        this.userStreamConnected = false;
-       console.log('WS User channel disconnected');
+       console.log(`WS User channel disconnected (${code}${reason ? `: ${reason.toString()}` : ''}), reconnecting in 3s`);
+       if (this.isConnected) {
+         this.userWsReconnectTimer = setTimeout(() => this.connectUserWs(creds), 3000);
+       }
     });
 
     this.wsUser.on('error', (err) => {
@@ -376,7 +444,16 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
       const price = String(fill.price || '0');
       const size = String(fill.size || '0');
       const fee = String(fill.fee || '0');
-      const createdAt = Date.now();
+      const conditionId = fill.conditionId || fill.market || '';
+      const rawOutcome = String(fill.outcome || '').toUpperCase();
+      const outcome = rawOutcome.includes('DOWN') || rawOutcome === 'NO' ? 'DOWN' : 'UP';
+      const createdAt = fill.createdAt || Date.now();
+
+      db.prepare(`INSERT OR IGNORE INTO orders (id, remoteOrderId, conditionId, tokenId, outcome, side, dollarSpend, size, price, filledShares, fees, status, remoteState, createdAt, updatedAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(orderId, orderId, conditionId, tokenId, outcome, side, '0', size, price, size, fee, 'FILLED', 'FILLED', createdAt, createdAt);
+      db.prepare(`UPDATE orders SET filledShares = ?, averageFillPrice = ?, fees = ?, status = 'FILLED', remoteState = 'FILLED', updatedAt = ? WHERE id = ?`)
+        .run(size, price, fee, createdAt, orderId);
 
       db.prepare(`INSERT OR IGNORE INTO fills (id, orderId, tokenId, side, price, size, fee, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(fillId, orderId, tokenId, side, price, size, fee, createdAt);
@@ -411,9 +488,9 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
 
       const avgPrice = netSize > 0 ? (totalCost / netSize).toFixed(4) : '0';
 
-      db.prepare(`INSERT INTO positions (tokenId, netSize, avgPrice, fees, realizedPnl, updatedAt) VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(tokenId) DO UPDATE SET netSize=excluded.netSize, avgPrice=excluded.avgPrice, fees=excluded.fees, realizedPnl=excluded.realizedPnl, updatedAt=excluded.updatedAt`)
-        .run(tokenId, String(netSize), String(avgPrice), String(totalFees), realizedPnl, createdAt);
+      db.prepare(`INSERT INTO positions (tokenId, conditionId, outcome, netSize, avgPrice, fees, realizedPnl, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(tokenId) DO UPDATE SET conditionId=excluded.conditionId, outcome=excluded.outcome, netSize=excluded.netSize, avgPrice=excluded.avgPrice, fees=excluded.fees, realizedPnl=excluded.realizedPnl, updatedAt=excluded.updatedAt`)
+        .run(tokenId, conditionId, outcome, String(netSize), String(avgPrice), String(totalFees), realizedPnl, createdAt);
 
       console.log(`Updated position for ${tokenId}: Net ${netSize} @ ${avgPrice}, Realized PnL: $${realizedPnl.toFixed(2)}`);
     } catch(err) {

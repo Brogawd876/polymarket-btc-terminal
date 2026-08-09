@@ -64,6 +64,10 @@ export function useWebSocket(url: string) {
         }
         else if (data.type === 'MARKET_UPDATE' || data.type === 'MARKET_UPDATED') {
           setMarketInfo(data.payload);
+          if (data.payload.operationalState) setOperationalState(data.payload.operationalState);
+          if (data.payload.readiness) setReadiness(data.payload.readiness);
+          if (data.payload.positions) setPositions(data.payload.positions);
+          if (data.payload.balance !== undefined) setBalance(data.payload.balance);
           setDiscoveredMarkets(prev => {
             const idx = prev.findIndex(m => m.marketId === data.payload.marketId);
             if (idx >= 0) {
@@ -84,6 +88,7 @@ export function useWebSocket(url: string) {
             connected: data.payload.connected,
             stale: data.payload.stale,
             dataAgeMs: data.payload.dataAgeMs,
+            currentPrice: data.payload.currentPrice,
             priceToBeat: data.payload.priceToBeat,
             difference: data.payload.difference,
             leadingOutcome: data.payload.leadingOutcome,
