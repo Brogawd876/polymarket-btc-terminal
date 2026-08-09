@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useWebSocket } from '../hooks/useWebSocket';
 import TradingPanel from './TradingPanel';
 import OrdersTab from './OrdersTab';
@@ -30,6 +30,12 @@ const App: React.FC = () => {
   const [expanded, setExpanded] = useState(false);
   const [minimized, setMinimized] = useState(false);
   const [activeTab, setActiveTab] = useState<'trade' | 'orders' | 'positions' | 'settings' | 'diag'>('trade');
+  const [pageHref, setPageHref] = useState(window.location.href);
+
+  useEffect(() => {
+    const interval = setInterval(() => setPageHref(window.location.href), 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   return (
     <div style={{ pointerEvents: 'auto' }} className={`fixed bottom-4 right-4 bg-gray-900 text-white rounded-lg shadow-2xl overflow-hidden flex flex-col transition-all duration-300 max-w-[calc(100vw-2rem)] ${minimized ? 'w-[260px] h-[42px]' : expanded ? 'w-[420px] h-[min(750px,calc(100vh-2rem))]' : 'w-[360px] h-[min(580px,calc(100vh-2rem))]'}`}>
@@ -83,6 +89,7 @@ const App: React.FC = () => {
             presets={presets}
             rtdsMetrics={rtdsMetrics}
             balance={balance}
+            pageHref={pageHref}
             backendError={lastError}
             clearBackendError={clearLastError}
           />

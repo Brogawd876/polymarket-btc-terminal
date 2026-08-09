@@ -605,10 +605,14 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
     } else {
       this.marketCache.set(market.conditionId, {
         ...existing,
+        slug: market.slug,
         title: market.title,
+        startTime: market.startTime,
         targetTime: market.targetTime,
         type: market.type,
         status: market.status,
+        tickSize: market.tickSize || existing.tickSize,
+        minimumOrderSize: market.minimumOrderSize || existing.minimumOrderSize,
       });
     }
   }

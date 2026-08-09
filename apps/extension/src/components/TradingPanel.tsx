@@ -24,6 +24,7 @@ interface Props {
   presets?: PresetConfig[];
   rtdsMetrics?: any;
   balance?: number;
+  pageHref?: string;
   backendError?: string;
   clearBackendError?: () => void;
 }
@@ -53,6 +54,7 @@ const TradingPanel: React.FC<Props> = ({
   presets = DEFAULT_PRESETS, 
   rtdsMetrics, 
   balance = 0,
+  pageHref = '',
   backendError = '',
   clearBackendError
 }) => {
@@ -122,6 +124,14 @@ const TradingPanel: React.FC<Props> = ({
   };
 
   const selectableMarkets = discoveredMarkets.filter(m => m.type !== 'PREVIOUS' && m.status !== 'CLOSED' && m.status !== 'RESOLVING');
+  const pageMarketSlug = pageHref.match(/\/event\/([^/?#]+)/)?.[1] || '';
+  const panelMarketSlug = marketInfo?.slug || '';
+  const pageMarketMismatch = Boolean(pageMarketSlug && panelMarketSlug && pageMarketSlug !== panelMarketSlug);
+  const openPanelMarket = () => {
+    if (panelMarketSlug) {
+      window.location.href = `/event/${panelMarketSlug}`;
+    }
+  };
 
   const handleArmLive = () => {
     sendMessage({ type: 'ARM_LIVE', payload: { durationSeconds: 300 } });
@@ -236,7 +246,7 @@ const TradingPanel: React.FC<Props> = ({
     return targetPrice.toFixed(2);
   };
 
-  const isExecutionBlocked: boolean = !readiness || (readiness.blockingReasons && readiness.blockingReasons.length > 0) || !readiness.liveArmed;
+  const isExecutionBlocked: boolean = pageMarketMismatch || !readiness || (readiness.blockingReasons && readiness.blockingReasons.length > 0) || !readiness.liveArmed;
   const activeQuote = getActiveQuote();
   const oneTapBuyShares = activeQuote.ask > 0 ? buySpendNum / activeQuote.ask : 0;
   const oneTapSellShares = parseFloat(sellShares || availableShares.toFixed(4)) || 0;
@@ -284,6 +294,22 @@ const TradingPanel: React.FC<Props> = ({
                 <span>{reason}</span>
               </div>
             ))}
+          </div>
+        )}
+
+        {pageMarketMismatch && (
+          <div className="bg-yellow-950/80 border border-yellow-700 p-1.5 rounded text-[10px] text-yellow-200 font-mono flex items-center justify-between gap-2">
+            <div className="flex items-start gap-1">
+              <AlertTriangle size={10} className="shrink-0 mt-0.5" />
+              <span>PAGE MARKET MISMATCH</span>
+            </div>
+            <button
+              onClick={openPanelMarket}
+              className="px-2 py-0.5 bg-yellow-600 hover:bg-yellow-500 text-gray-950 rounded font-bold uppercase"
+              title={panelMarketSlug ? `Open ${panelMarketSlug}` : 'Open panel market'}
+            >
+              Open
+            </button>
           </div>
         )}
       </div>
