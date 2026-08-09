@@ -80,15 +80,19 @@ export function useWebSocket(url: string) {
           if (data.payload.readiness) setReadiness(data.payload.readiness);
           if (data.payload.positions) setPositions(data.payload.positions);
           if (data.payload.balance !== undefined) setBalance(data.payload.balance);
-          setDiscoveredMarkets(prev => {
-            const idx = prev.findIndex(m => m.marketId === data.payload.marketId);
-            if (idx >= 0) {
-              const newArr = [...prev];
-              newArr[idx] = data.payload;
-              return newArr;
-            }
-            return prev;
-          });
+          if (data.payload.markets) {
+            setDiscoveredMarkets(data.payload.markets);
+          } else {
+            setDiscoveredMarkets(prev => {
+              const idx = prev.findIndex(m => m.marketId === data.payload.marketId);
+              if (idx >= 0) {
+                const newArr = [...prev];
+                newArr[idx] = data.payload;
+                return newArr;
+              }
+              return prev;
+            });
+          }
         }
         else if (data.type === 'DISCOVERY_UPDATE') {
           setDiscoveredMarkets(data.payload);

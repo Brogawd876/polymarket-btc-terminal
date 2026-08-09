@@ -217,12 +217,20 @@ export async function registerRoutes(app: FastifyInstance) {
           const db = getDb();
           const globalDiscoveryService = (globalThis as any).discoveryService;
           const currentMarket = globalDiscoveryService ? globalDiscoveryService.getCurrentMarket() : null;
-          const state = adapter ? await adapter.getMarketState(activeMarketId) : null;
+          const markets = globalDiscoveryService ? globalDiscoveryService.getMarkets() : [];
+          const selectedMarket = markets.find((market: any) => market.conditionId === activeMarketId);
+          if (!selectedMarket || (selectedMarket.targetTime && selectedMarket.targetTime <= Date.now())) {
+            activeMarketId = currentMarket?.conditionId || null;
+          }
+
+          const state = activeMarketId && adapter ? await adapter.getMarketState(activeMarketId) : null;
           if (state) {
-            const readiness = evaluateReadiness(currentMarket);
-            const operationalState = determineOperationalState(readiness, currentMarket);
+            const activeMarket = markets.find((market: any) => market.conditionId === activeMarketId) || currentMarket;
+            const readiness = evaluateReadiness(activeMarket);
+            const operationalState = determineOperationalState(readiness, activeMarket);
             const positions = db.prepare(`SELECT * FROM positions WHERE CAST(netSize AS REAL) > 0`).all() as any[];
             const balance = adapter ? await adapter.getBalance() : 0;
+            const updateMarkets = markets.map((market: any) => market.conditionId === state.conditionId ? state : market);
             connection.socket.send(JSON.stringify({ 
               type: 'MARKET_UPDATE', 
               payload: {
@@ -231,6 +239,7 @@ export async function registerRoutes(app: FastifyInstance) {
                 operationalState,
                 positions,
                 balance,
+                markets: updateMarkets,
               }
             }));
           }

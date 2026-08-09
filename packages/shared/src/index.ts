@@ -258,6 +258,7 @@ export const WsEventSchema = z.discriminatedUnion('type', [
       readiness: LiveReadinessSchema.optional(),
       positions: z.array(PositionSchema).optional(),
       balance: z.number().optional(),
+      markets: z.array(MarketStateSchema).optional(),
     }),
   }).merge(BaseMessageSchema),
 
