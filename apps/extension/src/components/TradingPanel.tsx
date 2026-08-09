@@ -60,6 +60,7 @@ const TradingPanel: React.FC<Props> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string>('');
   const [countdown, setCountdown] = useState<string>('');
+  const activePresets = presets.length > 0 ? presets : DEFAULT_PRESETS;
 
   const activeTokenId = marketInfo 
     ? (activeOutcome === 'UP' ? (marketInfo.upTokenId || marketInfo.yesTokenId) : (marketInfo.downTokenId || marketInfo.noTokenId))
@@ -385,7 +386,7 @@ const TradingPanel: React.FC<Props> = ({
         {/* Dynamic BUY Price Buttons */}
         <div className="text-[10px] text-gray-400 font-bold pt-1 border-t border-gray-700">BUY {activeOutcome} MAKER PRESETS</div>
         <div className="grid grid-cols-3 gap-1.5">
-          {presets.filter(p => p.side === 'BUY' && p.active).map(preset => {
+          {activePresets.filter(p => p.side === 'BUY' && p.active).map(preset => {
             const price = calculatePresetPrice(preset);
             const priceNum = price ? parseFloat(price) : 0.5;
             const shares = priceNum > 0 ? (buySpendNum / priceNum).toFixed(1) : '0';
@@ -444,7 +445,7 @@ const TradingPanel: React.FC<Props> = ({
         {/* Dynamic SELL Price Buttons */}
         <div className="text-[10px] text-gray-400 font-bold pt-1 border-t border-gray-700">SELL {activeOutcome} MAKER PRESETS</div>
         <div className="grid grid-cols-3 gap-1.5">
-          {presets.filter(p => p.side === 'SELL' && p.active).map(preset => {
+          {activePresets.filter(p => p.side === 'SELL' && p.active).map(preset => {
             const price = calculatePresetPrice(preset);
             const sharesToSell = sellShares || availableShares.toFixed(1);
             const sharesToSellNum = parseFloat(sharesToSell) || 0;

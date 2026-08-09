@@ -32,7 +32,7 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'trade' | 'orders' | 'positions' | 'settings' | 'diag'>('trade');
 
   return (
-    <div style={{ pointerEvents: 'auto' }} className={`fixed bottom-4 right-4 bg-gray-900 text-white rounded-lg shadow-2xl overflow-hidden flex flex-col transition-all duration-300 ${minimized ? 'w-[260px] h-[42px]' : expanded ? 'w-[420px] h-[750px]' : 'w-[360px] h-[580px]'}`}>
+    <div style={{ pointerEvents: 'auto' }} className={`fixed bottom-4 right-4 bg-gray-900 text-white rounded-lg shadow-2xl overflow-hidden flex flex-col transition-all duration-300 max-w-[calc(100vw-2rem)] ${minimized ? 'w-[260px] h-[42px]' : expanded ? 'w-[420px] h-[min(750px,calc(100vh-2rem))]' : 'w-[360px] h-[min(580px,calc(100vh-2rem))]'}`}>
       {/* Header */}
       <div className="flex items-center justify-between p-2.5 bg-gray-800 border-b border-gray-700 font-mono">
         <div className="flex items-center gap-2 min-w-0">

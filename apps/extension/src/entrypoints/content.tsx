@@ -22,10 +22,11 @@ export default defineContentScript({
           shadowRoot.host.style.position = 'fixed';
           shadowRoot.host.style.inset = '0';
           shadowRoot.host.style.zIndex = '2147483647';
-          shadowRoot.host.style.width = '100vw';
-          shadowRoot.host.style.height = '100vh';
+          shadowRoot.host.style.width = '0';
+          shadowRoot.host.style.height = '0';
           shadowRoot.host.style.display = 'block';
           shadowRoot.host.style.pointerEvents = 'none';
+          shadowRoot.host.style.overflow = 'visible';
         }
 
         const parent = container.parentElement;
@@ -33,15 +34,17 @@ export default defineContentScript({
           parent.style.position = 'fixed';
           parent.style.inset = '0';
           parent.style.zIndex = '2147483647';
-          parent.style.width = '100vw';
-          parent.style.height = '100vh';
+          parent.style.width = '0';
+          parent.style.height = '0';
           parent.style.display = 'block';
           parent.style.pointerEvents = 'none';
+          parent.style.overflow = 'visible';
         }
         container.style.display = 'block';
-        container.style.width = '100vw';
-        container.style.height = '100vh';
+        container.style.width = '0';
+        container.style.height = '0';
         container.style.pointerEvents = 'none';
+        container.style.overflow = 'visible';
         const root = ReactDOM.createRoot(container);
         root.render(<App />);
         return root;
