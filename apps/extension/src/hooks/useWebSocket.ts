@@ -79,6 +79,7 @@ export function useWebSocket(url: string) {
           if (data.payload.operationalState) setOperationalState(data.payload.operationalState);
           if (data.payload.readiness) setReadiness(data.payload.readiness);
           if (data.payload.positions) setPositions(data.payload.positions);
+          if (data.payload.orders) setOrders(data.payload.orders);
           if (data.payload.balance !== undefined) setBalance(data.payload.balance);
           if (data.payload.markets) {
             setDiscoveredMarkets(data.payload.markets);

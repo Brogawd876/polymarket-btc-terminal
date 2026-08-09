@@ -136,7 +136,7 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
       });
 
       const db = getDb();
-      const restingOrders = db.prepare(`SELECT id, status, clientRequestId FROM orders WHERE status IN ('PENDING', 'OPEN', 'NEW', 'SUBMITTING', 'RECONCILING')`).all() as { id: string, status: string, clientRequestId?: string }[];
+      const restingOrders = db.prepare(`SELECT id, status, clientRequestId FROM orders WHERE status IN ('PENDING', 'OPEN', 'NEW', 'LIVE', 'SUBMITTING', 'ACCEPTED', 'PARTIALLY_FILLED', 'CANCEL_PENDING', 'RECONCILING')`).all() as { id: string, status: string, clientRequestId?: string }[];
 
       for (const order of restingOrders) {
         if (remoteOrderMap.has(order.id)) {
@@ -347,8 +347,8 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
         const ob = this.orderbooks.get(assetId) || { bids: [], asks: [] };
         if (change.bids && Array.isArray(change.bids)) ob.bids = change.bids;
         if (change.asks && Array.isArray(change.asks)) ob.asks = change.asks;
-        if (change.best_bid) ob.bids = [{ price: change.best_bid, size: change.size || '0' }, ...ob.bids.slice(1)];
-        if (change.best_ask) ob.asks = [{ price: change.best_ask, size: change.size || '0' }, ...ob.asks.slice(1)];
+        if (change.best_bid) ob.bids = [{ price: change.best_bid, size: change.bid_size || change.size || '1' }, ...ob.bids.slice(1)];
+        if (change.best_ask) ob.asks = [{ price: change.best_ask, size: change.ask_size || change.size || '1' }, ...ob.asks.slice(1)];
         this.orderbooks.set(assetId, ob);
         changedConditions.add(conditionId);
       }
@@ -361,8 +361,8 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
       if (!conditionId) return;
 
       const ob = this.orderbooks.get(assetId) || { bids: [], asks: [] };
-      if (msg.best_bid) ob.bids = [{ price: msg.best_bid, size: '0' }, ...ob.bids.slice(1)];
-      if (msg.best_ask) ob.asks = [{ price: msg.best_ask, size: '0' }, ...ob.asks.slice(1)];
+      if (msg.best_bid) ob.bids = [{ price: msg.best_bid, size: msg.bid_size || msg.size || '1' }, ...ob.bids.slice(1)];
+      if (msg.best_ask) ob.asks = [{ price: msg.best_ask, size: msg.ask_size || msg.size || '1' }, ...ob.asks.slice(1)];
       this.orderbooks.set(assetId, ob);
       this.updateMarketStateFromOrderbooks(conditionId);
     }
@@ -374,7 +374,7 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
     } else if (item.event === 'order' || item.event === 'order_change') {
       const orderId = item.order_id || item.id;
       if (!orderId) return;
-      const status = item.status;
+      const status = String(item.status || '').toLowerCase();
       const db = getDb();
       if (status === 'canceled' || status === 'cancelled' || status === 'closed') {
         db.prepare(`UPDATE orders SET status = 'CANCELLED', remoteState = 'CANCELLED', updatedAt = ? WHERE id = ? AND status != 'FILLED'`).run(Date.now(), orderId);
@@ -461,6 +461,27 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
     return Number.isFinite(best) ? best.toFixed(2) : '0';
   }
 
+  private inferOutcome(tokenId: string, rawOutcome?: any, db?: any): 'UP' | 'DOWN' {
+    const normalized = String(rawOutcome || '').toUpperCase();
+    if (normalized.includes('DOWN') || normalized === 'NO') return 'DOWN';
+    if (normalized.includes('UP') || normalized === 'YES') return 'UP';
+
+    const conditionId = this.tokenToCondition.get(tokenId);
+    const tokens = conditionId ? this.conditionTokens.get(conditionId) : undefined;
+    if (tokens?.downTokenId === tokenId) return 'DOWN';
+    if (tokens?.upTokenId === tokenId) return 'UP';
+
+    try {
+      const existing = db?.prepare(`SELECT outcome FROM orders WHERE tokenId = ? AND outcome IS NOT NULL ORDER BY updatedAt DESC LIMIT 1`).get(tokenId) as { outcome?: string } | undefined;
+      if (String(existing?.outcome || '').toUpperCase() === 'DOWN') return 'DOWN';
+      if (String(existing?.outcome || '').toUpperCase() === 'UP') return 'UP';
+    } catch {
+      // Token mapping is authoritative when present; DB lookup is only a fallback.
+    }
+
+    return 'UP';
+  }
+
   private handleFill(fill: any) {
     console.log('Received fill event:', fill);
     try {
@@ -473,18 +494,34 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
       const size = String(fill.size || '0');
       const fee = String(fill.fee || '0');
       const conditionId = fill.conditionId || fill.market || '';
-      const rawOutcome = String(fill.outcome || '').toUpperCase();
-      const outcome = rawOutcome.includes('DOWN') || rawOutcome === 'NO' ? 'DOWN' : 'UP';
+      const outcome = this.inferOutcome(tokenId, fill.outcome, db);
       const createdAt = fill.createdAt || Date.now();
 
       db.prepare(`INSERT OR IGNORE INTO orders (id, remoteOrderId, conditionId, tokenId, outcome, side, dollarSpend, size, price, filledShares, fees, status, remoteState, createdAt, updatedAt)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(orderId, orderId, conditionId, tokenId, outcome, side, '0', size, price, size, fee, 'FILLED', 'FILLED', createdAt, createdAt);
-      db.prepare(`UPDATE orders SET filledShares = ?, averageFillPrice = ?, fees = ?, status = 'FILLED', remoteState = 'FILLED', updatedAt = ? WHERE id = ?`)
-        .run(size, price, fee, createdAt, orderId);
 
-      db.prepare(`INSERT OR IGNORE INTO fills (id, orderId, tokenId, side, price, size, fee, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(fillId, orderId, tokenId, side, price, size, fee, createdAt);
+      db.prepare(`INSERT OR IGNORE INTO fills (id, orderId, tokenId, outcome, side, price, size, fee, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(fillId, orderId, tokenId, outcome, side, price, size, fee, createdAt);
+
+      const orderTotals = db.prepare(`
+        SELECT
+          SUM(CAST(size AS REAL)) AS filledShares,
+          SUM(CAST(size AS REAL) * CAST(price AS REAL)) AS notional,
+          SUM(CAST(fee AS REAL)) AS fees
+        FROM fills
+        WHERE orderId = ?
+      `).get(orderId) as { filledShares?: number, notional?: number, fees?: number } | undefined;
+      const aggregateFilled = Number(orderTotals?.filledShares || 0);
+      const aggregateNotional = Number(orderTotals?.notional || 0);
+      const aggregateFees = Number(orderTotals?.fees || 0);
+      const existingOrder = db.prepare(`SELECT size FROM orders WHERE id = ?`).get(orderId) as { size?: string } | undefined;
+      const originalSize = parseFloat(existingOrder?.size || '0');
+      const aggregateStatus = originalSize > 0 && aggregateFilled + 0.000001 < originalSize ? 'PARTIALLY_FILLED' : 'FILLED';
+      const averageFillPrice = aggregateFilled > 0 ? (aggregateNotional / aggregateFilled).toFixed(4) : price;
+
+      db.prepare(`UPDATE orders SET filledShares = ?, averageFillPrice = ?, fees = ?, status = ?, remoteState = ?, updatedAt = ? WHERE id = ?`)
+        .run(String(aggregateFilled), averageFillPrice, String(aggregateFees), aggregateStatus, aggregateStatus, createdAt, orderId);
 
       const fills = db.prepare(`SELECT side, price, size, fee FROM fills WHERE tokenId = ?`).all(tokenId) as { side: string, price: string, size: string, fee: string }[];
       

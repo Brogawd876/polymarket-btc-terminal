@@ -33,6 +33,94 @@ const SubscribeMarketSchema = z.object({
 
 let liveArmedState = false;
 let armTimeout: NodeJS.Timeout | null = null;
+const PANEL_ORDER_RECENCY_MS = 2 * 60 * 60 * 1000;
+const ACTIVE_ORDER_STATUS_SQL = "'PENDING','OPEN','NEW','LIVE','SUBMITTING','ACCEPTED','PARTIALLY_FILLED','CANCEL_PENDING','RECONCILING'";
+
+function normalizeOrderRow(row: any): any {
+  if (!row) return row;
+  return {
+    ...row,
+    timestamp: row.createdAt || row.updatedAt || Date.now(),
+  };
+}
+
+function getPanelOrders(db: any): any[] {
+  return (db.prepare(`
+    SELECT * FROM orders
+    WHERE status IN (${ACTIVE_ORDER_STATUS_SQL})
+       OR createdAt >= ?
+    ORDER BY createdAt DESC
+    LIMIT 100
+  `).all(Date.now() - PANEL_ORDER_RECENCY_MS) as any[]).map(normalizeOrderRow);
+}
+
+function persistPlacedOrder(db: any, values: {
+  order: any;
+  requestId: string;
+  currentMarket: any;
+  tokenId: string;
+  outcome?: 'UP' | 'DOWN';
+  side: 'BUY' | 'SELL';
+  dollarSpend?: string;
+  presetId?: string;
+}) {
+  const now = Date.now();
+  const order = values.order;
+  const conditionId = order.conditionId || values.currentMarket?.conditionId || '';
+  const dollarSpend = order.dollarSpend || values.dollarSpend || '0';
+  const filledShares = order.filledShares || '0';
+  const averageFillPrice = order.averageFillPrice || null;
+  const fees = order.fees || '0';
+  const status = order.status || 'ACCEPTED';
+  const remoteState = order.state || order.remoteState || status;
+
+  db.prepare(`
+    INSERT INTO orders (
+      id, clientRequestId, remoteOrderId, conditionId, tokenId, outcome, side,
+      dollarSpend, size, price, presetId, filledShares, averageFillPrice, fees,
+      status, remoteState, createdAt, updatedAt
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      clientRequestId = COALESCE(excluded.clientRequestId, orders.clientRequestId),
+      remoteOrderId = COALESCE(excluded.remoteOrderId, orders.remoteOrderId),
+      conditionId = COALESCE(NULLIF(excluded.conditionId, ''), orders.conditionId),
+      tokenId = excluded.tokenId,
+      outcome = COALESCE(excluded.outcome, orders.outcome),
+      side = excluded.side,
+      dollarSpend = CASE WHEN excluded.dollarSpend != '0' THEN excluded.dollarSpend ELSE orders.dollarSpend END,
+      size = CASE WHEN orders.status = 'FILLED' THEN orders.size ELSE excluded.size END,
+      price = CASE WHEN orders.status = 'FILLED' THEN orders.price ELSE excluded.price END,
+      presetId = COALESCE(NULLIF(excluded.presetId, ''), orders.presetId),
+      filledShares = CASE WHEN orders.status IN ('FILLED', 'PARTIALLY_FILLED') THEN orders.filledShares ELSE excluded.filledShares END,
+      averageFillPrice = COALESCE(orders.averageFillPrice, excluded.averageFillPrice),
+      fees = CASE WHEN orders.status IN ('FILLED', 'PARTIALLY_FILLED') THEN orders.fees ELSE excluded.fees END,
+      status = CASE WHEN orders.status IN ('FILLED', 'PARTIALLY_FILLED') THEN orders.status ELSE excluded.status END,
+      remoteState = CASE WHEN orders.status IN ('FILLED', 'PARTIALLY_FILLED') THEN orders.remoteState ELSE excluded.remoteState END,
+      updatedAt = excluded.updatedAt
+  `).run(
+    order.id,
+    values.requestId,
+    order.remoteOrderId || order.id,
+    conditionId,
+    values.tokenId,
+    order.outcome || values.outcome || 'UP',
+    values.side,
+    dollarSpend,
+    order.size || '0',
+    order.price || '0',
+    values.presetId || order.presetId || '',
+    filledShares,
+    averageFillPrice,
+    fees,
+    status,
+    remoteState,
+    order.createdAt || now,
+    now
+  );
+
+  return normalizeOrderRow(db.prepare(`SELECT * FROM orders WHERE id = ?`).get(order.id));
+}
 
 function armLive(durationMs: number = 300000) {
   liveArmedState = true;
@@ -231,6 +319,7 @@ export async function registerRoutes(app: FastifyInstance) {
             const readiness = evaluateReadiness(activeMarket);
             const operationalState = determineOperationalState(readiness, activeMarket);
             const positions = db.prepare(`SELECT * FROM positions WHERE CAST(netSize AS REAL) > 0`).all() as any[];
+            const orders = getPanelOrders(db);
             const balance = adapter ? await adapter.getBalance() : 0;
             const updateMarkets = markets.map((market: any) => market.conditionId === state.conditionId ? state : market);
             connection.socket.send(JSON.stringify({ 
@@ -240,6 +329,7 @@ export async function registerRoutes(app: FastifyInstance) {
                 readiness,
                 operationalState,
                 positions,
+                orders,
                 balance,
                 markets: updateMarkets,
               }
@@ -312,7 +402,7 @@ export async function registerRoutes(app: FastifyInstance) {
             ? discoveredMarkets.map((market: any) => market.conditionId === refreshedMarket.conditionId ? refreshedMarket : market)
             : discoveredMarkets;
 
-          const orders = db.prepare(`SELECT * FROM orders WHERE status IN ('PENDING', 'OPEN', 'NEW', 'LIVE', 'SUBMITTING')`).all() as any[];
+          const orders = getPanelOrders(db);
           const positions = db.prepare(`SELECT * FROM positions WHERE CAST(netSize AS REAL) > 0`).all() as any[];
           const balance = adapter ? await adapter.getBalance() : 0;
           const account = adapter ? await adapter.getAccountState() : undefined;
@@ -437,14 +527,21 @@ export async function registerRoutes(app: FastifyInstance) {
             order.presetId = presetId;
             order.conditionId = currentMarket?.conditionId;
 
-            db.prepare(`INSERT INTO orders (id, clientRequestId, remoteOrderId, conditionId, tokenId, outcome, side, dollarSpend, size, price, presetId, status, remoteState, createdAt, updatedAt) 
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-              .run(order.id, requestId, order.remoteOrderId || order.id, currentMarket?.conditionId || '', tokenId, outcome || 'UP', side, dollarSpend || '0', size, price, presetId || '', order.status, order.state || order.status, Date.now(), Date.now());
+            const storedOrder = persistPlacedOrder(db, {
+              order,
+              requestId,
+              currentMarket,
+              tokenId,
+              outcome,
+              side,
+              dollarSpend,
+              presetId,
+            });
             
             const responseMsg = JSON.stringify({ 
                type: 'ORDER_UPDATE', 
                id: requestId,
-               payload: order 
+               payload: storedOrder || order
             });
 
             db.prepare(`UPDATE idempotency SET status='COMPLETED', response=?, updatedAt=? WHERE requestId=?`).run(responseMsg, Date.now(), requestId);
@@ -469,7 +566,8 @@ export async function registerRoutes(app: FastifyInstance) {
             if (success) {
               db.prepare(`UPDATE orders SET status='CANCELLED', remoteState='CANCELLED', updatedAt=? WHERE id=?`).run(Date.now(), orderId);
             }
-            const responseMsg = JSON.stringify({ type: 'ORDER_UPDATE', id: payload.id, payload: { id: orderId, status: success ? 'CANCELLED' : 'ERROR' } });
+            const storedOrder = normalizeOrderRow(db.prepare(`SELECT * FROM orders WHERE id = ?`).get(orderId));
+            const responseMsg = JSON.stringify({ type: 'ORDER_UPDATE', id: payload.id, payload: storedOrder || { id: orderId, status: success ? 'CANCELLED' : 'ERROR' } });
             connection.socket.send(responseMsg);
           } catch (e: any) {
             connection.socket.send(JSON.stringify({ type: 'ERROR', error: e.message, id: payload.id }));
@@ -480,7 +578,7 @@ export async function registerRoutes(app: FastifyInstance) {
           try {
             if (!adapter) throw new Error('Adapter not initialized');
             await adapter.cancelAll();
-            db.prepare(`UPDATE orders SET status='CANCELLED', remoteState='CANCELLED', updatedAt=? WHERE status IN ('PENDING', 'OPEN', 'LIVE', 'NEW')`).run(Date.now());
+            db.prepare(`UPDATE orders SET status='CANCELLED', remoteState='CANCELLED', updatedAt=? WHERE status IN ('PENDING', 'OPEN', 'NEW', 'LIVE', 'SUBMITTING', 'ACCEPTED', 'PARTIALLY_FILLED', 'CANCEL_PENDING', 'RECONCILING')`).run(Date.now());
             connection.socket.send(JSON.stringify({ type: 'SNAPSHOT_REQUEST', id: payload.id }));
           } catch (e: any) {
             connection.socket.send(JSON.stringify({ type: 'ERROR', error: e.message, id: payload.id }));
