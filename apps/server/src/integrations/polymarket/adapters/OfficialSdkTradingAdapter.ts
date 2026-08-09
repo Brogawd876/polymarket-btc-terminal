@@ -1,6 +1,6 @@
 import { Order, MarketState, Side, OrderState, AccountState, Position } from '@polymarket-btc/shared';
 import { ethers } from 'ethers';
-import { AssetType, ClobClient, Side as ClobSide, OrderType } from '@polymarket/clob-client-v2';
+import { AssetType, ClobClient, Side as ClobSide, OrderType, type TickSize } from '@polymarket/clob-client-v2';
 import WebSocket from 'ws';
 import { getDb } from '../../../db/index';
 import { TradingAdapter } from './TradingAdapter';
@@ -9,6 +9,11 @@ import { TradingError } from '../../../errors/TradingError';
 const PRIVATE_KEY = process.env.PRIVATE_KEY || '';
 const POLY_SIGNATURE_TYPE = parseInt(process.env.POLY_SIGNATURE_TYPE || '1', 10);
 const POLY_FUNDER_ADDRESS = process.env.POLY_FUNDER_ADDRESS;
+const SUPPORTED_TICK_SIZES: TickSize[] = ['0.1', '0.01', '0.005', '0.0025', '0.001', '0.0001'];
+
+function normalizeTickSize(value: string): TickSize {
+  return SUPPORTED_TICK_SIZES.includes(value as TickSize) ? value as TickSize : '0.01';
+}
 
 export class OfficialSdkTradingAdapter extends TradingAdapter {
   private isConnected: boolean = false;
@@ -562,7 +567,8 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
     } catch (e) {
       console.warn('Using default tick size 0.01');
     }
-    const tickSize = parseFloat(tickSizeStr) || 0.01;
+    const normalizedTickSize = normalizeTickSize(tickSizeStr);
+    const tickSize = parseFloat(normalizedTickSize) || 0.01;
     
     let precision = 2;
     if (tickSizeStr.includes('.')) {
@@ -581,15 +587,20 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
       size: Number(roundedSize.toFixed(precision)),
       feeRateBps: 0,
       nonce: 0,
-      postOnly: true
     };
 
     try {
-      const signedOrder = await this.clobClient.createOrder(orderArgs);
-      const response = await this.clobClient.postOrder(signedOrder, OrderType.GTC, true);
+      const response = await this.clobClient.createAndPostOrder(
+        orderArgs,
+        { tickSize: normalizedTickSize },
+        OrderType.GTC,
+        true
+      );
+      console.log(`Polymarket CLOB order response: ${JSON.stringify(response)}`);
       
-      if ((response as any).errorMsg) {
-         throw new TradingError(`Polymarket API error: ${(response as any).errorMsg}`, 'API_ERROR');
+      if ((response as any).error || (response as any).errorMsg || !(response as any).success) {
+        const reason = (response as any).errorMsg || (response as any).error || (response as any).status || JSON.stringify(response);
+        throw new TradingError(`Polymarket API rejected order: ${reason}`, 'API_REJECTED_ORDER');
       }
 
       const order: Order = {

@@ -435,7 +435,7 @@ export async function registerRoutes(app: FastifyInstance) {
 
             db.prepare(`INSERT INTO orders (id, clientRequestId, remoteOrderId, conditionId, tokenId, outcome, side, dollarSpend, size, price, presetId, status, remoteState, createdAt, updatedAt) 
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-              .run(order.id, requestId, order.remoteOrderId || order.id, currentMarket?.conditionId || '', tokenId, outcome || 'UP', side, dollarSpend || '0', size, price, presetId || '', order.status, 'LIVE', Date.now(), Date.now());
+              .run(order.id, requestId, order.remoteOrderId || order.id, currentMarket?.conditionId || '', tokenId, outcome || 'UP', side, dollarSpend || '0', size, price, presetId || '', order.status, order.state || order.status, Date.now(), Date.now());
             
             const responseMsg = JSON.stringify({ 
                type: 'ORDER_UPDATE', 
