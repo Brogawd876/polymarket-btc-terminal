@@ -396,19 +396,23 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
     let upBid = '0', upAsk = '0', downBid = '0', downAsk = '0';
     let upPrice = '0.50', downPrice = '0.50';
     
+    const existing = this.marketCache.get(conditionId);
+
     if (upOb) {
-      upBid = this.getBestBid(upOb.bids);
-      upAsk = this.getBestAsk(upOb.asks);
+      const quote = this.resolveCrossedQuote(this.getBestBid(upOb.bids), this.getBestAsk(upOb.asks), existing?.upBid, existing?.upAsk);
+      upBid = quote.bid;
+      upAsk = quote.ask;
       upPrice = upBid !== '0' ? upBid : (upAsk !== '0' ? upAsk : '0.50');
     }
     
     if (downOb) {
-      downBid = this.getBestBid(downOb.bids);
-      downAsk = this.getBestAsk(downOb.asks);
+      const quote = this.resolveCrossedQuote(this.getBestBid(downOb.bids), this.getBestAsk(downOb.asks), existing?.downBid, existing?.downAsk);
+      downBid = quote.bid;
+      downAsk = quote.ask;
       downPrice = downBid !== '0' ? downBid : (downAsk !== '0' ? downAsk : '0.50');
     }
     
-    const existing = this.marketCache.get(conditionId) || {
+    const existingOrDefault = existing || {
       marketId: conditionId,
       conditionId,
       upTokenId: tokens.upTokenId,
@@ -422,7 +426,7 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
     };
     
     this.marketCache.set(conditionId, {
-      ...existing,
+      ...existingOrDefault,
       upPrice,
       downPrice,
       yesPrice: upPrice,
@@ -437,6 +441,20 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
       noAsk: downAsk,
       lastUpdated: Date.now()
     } as MarketState);
+  }
+
+  private resolveCrossedQuote(bid: string, ask: string, previousBid?: string, previousAsk?: string): { bid: string, ask: string } {
+    const bidNum = parseFloat(bid || '0');
+    const askNum = parseFloat(ask || '0');
+    if (bidNum > 0 && askNum > 0 && bidNum > askNum) {
+      const previousBidNum = parseFloat(previousBid || '0');
+      const previousAskNum = parseFloat(previousAsk || '0');
+      if (previousBidNum > 0 && previousAskNum > 0 && previousBidNum <= previousAskNum) {
+        return { bid: previousBid!, ask: previousAsk! };
+      }
+      return { bid: '0', ask: '0' };
+    }
+    return { bid, ask };
   }
 
   private getBestBid(levels: any[]): string {

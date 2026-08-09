@@ -122,6 +122,15 @@ function persistPlacedOrder(db: any, values: {
   return normalizeOrderRow(db.prepare(`SELECT * FROM orders WHERE id = ?`).get(order.id));
 }
 
+function subscribeAdapterToMarket(market: any) {
+  if (!market || !adapter) return;
+  const upToken = market.upTokenId || market.yesTokenId;
+  const downToken = market.downTokenId || market.noTokenId;
+  if (market.conditionId && upToken && downToken) {
+    adapter.subscribeToMarket(market.conditionId, upToken, downToken);
+  }
+}
+
 function armLive(durationMs: number = 300000) {
   liveArmedState = true;
   if (armTimeout) clearTimeout(armTimeout);
@@ -302,42 +311,45 @@ export async function registerRoutes(app: FastifyInstance) {
     }, 3000);
     
     const intervalId = setInterval(async () => {
-      if (activeMarketId) {
-        try {
-          const db = getDb();
-          const globalDiscoveryService = (globalThis as any).discoveryService;
-          const currentMarket = globalDiscoveryService ? globalDiscoveryService.getCurrentMarket() : null;
-          const markets = globalDiscoveryService ? globalDiscoveryService.getMarkets() : [];
-          const selectedMarket = markets.find((market: any) => market.conditionId === activeMarketId);
-          if (!selectedMarket || (selectedMarket.targetTime && selectedMarket.targetTime <= Date.now())) {
-            activeMarketId = currentMarket?.conditionId || null;
-          }
-
-          const state = activeMarketId && adapter ? await adapter.getMarketState(activeMarketId) : null;
-          if (state) {
-            const activeMarket = markets.find((market: any) => market.conditionId === activeMarketId) || currentMarket;
-            const readiness = evaluateReadiness(activeMarket);
-            const operationalState = determineOperationalState(readiness, activeMarket);
-            const positions = db.prepare(`SELECT * FROM positions WHERE CAST(netSize AS REAL) > 0`).all() as any[];
-            const orders = getPanelOrders(db);
-            const balance = adapter ? await adapter.getBalance() : 0;
-            const updateMarkets = markets.map((market: any) => market.conditionId === state.conditionId ? state : market);
-            connection.socket.send(JSON.stringify({ 
-              type: 'MARKET_UPDATE', 
-              payload: {
-                ...state,
-                readiness,
-                operationalState,
-                positions,
-                orders,
-                balance,
-                markets: updateMarkets,
-              }
-            }));
-          }
-        } catch (err) {
-          // Ignore
+      try {
+        const db = getDb();
+        const globalDiscoveryService = (globalThis as any).discoveryService;
+        const currentMarket = globalDiscoveryService ? globalDiscoveryService.getCurrentMarket() : null;
+        const markets = globalDiscoveryService ? globalDiscoveryService.getMarkets() : [];
+        if (!activeMarketId && currentMarket?.conditionId) {
+          activeMarketId = currentMarket.conditionId;
+          subscribeAdapterToMarket(currentMarket);
         }
+        const selectedMarket = markets.find((market: any) => market.conditionId === activeMarketId);
+        if (activeMarketId && (!selectedMarket || (selectedMarket.targetTime && selectedMarket.targetTime <= Date.now()))) {
+          activeMarketId = currentMarket?.conditionId || null;
+          subscribeAdapterToMarket(currentMarket);
+        }
+
+        const state = activeMarketId && adapter ? await adapter.getMarketState(activeMarketId) : null;
+        if (state) {
+          const activeMarket = markets.find((market: any) => market.conditionId === activeMarketId) || currentMarket;
+          const readiness = evaluateReadiness(activeMarket);
+          const operationalState = determineOperationalState(readiness, activeMarket);
+          const positions = db.prepare(`SELECT * FROM positions WHERE CAST(netSize AS REAL) > 0`).all() as any[];
+          const orders = getPanelOrders(db);
+          const balance = adapter ? await adapter.getBalance() : 0;
+          const updateMarkets = markets.map((market: any) => market.conditionId === state.conditionId ? state : market);
+          connection.socket.send(JSON.stringify({
+            type: 'MARKET_UPDATE',
+            payload: {
+              ...state,
+              readiness,
+              operationalState,
+              positions,
+              orders,
+              balance,
+              markets: updateMarkets,
+            }
+          }));
+        }
+      } catch (err) {
+        // Ignore
       }
     }, 1000);
 
@@ -397,6 +409,10 @@ export async function registerRoutes(app: FastifyInstance) {
           const refreshedMarket = currentMarket && adapter
             ? await adapter.getMarketState(currentMarket.conditionId)
             : null;
+          if ((refreshedMarket || currentMarket)?.conditionId) {
+            activeMarketId = (refreshedMarket || currentMarket).conditionId;
+            subscribeAdapterToMarket(refreshedMarket || currentMarket);
+          }
           const discoveredMarkets = globalDiscoveryService ? globalDiscoveryService.getMarkets() : [];
           const snapshotMarkets = refreshedMarket
             ? discoveredMarkets.map((market: any) => market.conditionId === refreshedMarket.conditionId ? refreshedMarket : market)
@@ -597,7 +613,11 @@ export async function registerRoutes(app: FastifyInstance) {
           const upToken = validation.data.upTokenId || validation.data.yesTokenId || '';
           const downToken = validation.data.downTokenId || validation.data.noTokenId || '';
           if (upToken && downToken && adapter) {
-            adapter.subscribeToMarket(validation.data.conditionId, upToken, downToken);
+            subscribeAdapterToMarket({
+              conditionId: validation.data.conditionId,
+              upTokenId: upToken,
+              downTokenId: downToken,
+            });
             const selectedMarket = globalDiscoveryService
               ? globalDiscoveryService.getMarkets().find((market: any) => market.conditionId === validation.data.conditionId)
               : null;
