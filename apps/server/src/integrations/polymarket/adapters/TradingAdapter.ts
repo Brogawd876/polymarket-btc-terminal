@@ -7,6 +7,7 @@ export abstract class TradingAdapter {
   abstract getUserStreamConnected(): boolean;
   abstract getLastReconciliationTime(): number;
   abstract placeOrder(tokenId: string, side: Side, size: string, price: string, orderType?: 'GTC'): Promise<Order>;
+  abstract placeMarketOrder(tokenId: string, side: Side, amount: string, slippageBps?: number): Promise<Order>;
   abstract cancelOrder(orderId: string): Promise<boolean>;
   abstract cancelAll(): Promise<boolean>;
   abstract getMarketState(conditionId: string): Promise<any>;

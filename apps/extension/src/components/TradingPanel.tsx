@@ -7,9 +7,11 @@ import type {
   LiveReadiness, 
   OperationalState, 
   Position, 
-  Outcome 
+  Outcome
 } from '@polymarket-btc/shared';
-import { AlertTriangle, Play, Square } from 'lucide-react';
+import { AlertTriangle, Play, Square, Zap } from 'lucide-react';
+
+type ExecutionMode = 'MAKER' | 'ONE_TAP';
 
 interface Props {
   operationalState: OperationalState;
@@ -57,6 +59,8 @@ const TradingPanel: React.FC<Props> = ({
   const [buyUsdSpend, setBuyUsdSpend] = useState<string>('25');
   const [sellShares, setSellShares] = useState<string>('');
   const [activeOutcome, setActiveOutcome] = useState<Outcome>('UP');
+  const [executionMode, setExecutionMode] = useState<ExecutionMode>('MAKER');
+  const [slippageBps, setSlippageBps] = useState<number>(100);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string>('');
   const [countdown, setCountdown] = useState<string>('');
@@ -142,7 +146,48 @@ const TradingPanel: React.FC<Props> = ({
         dollarSpend: capturedUsd,
         size: capturedSize,
         price: capturedPrice,
+        executionMode: 'MAKER',
         orderType: 'GTC'
+      }
+    });
+  };
+
+  const getActiveQuote = () => {
+    if (!marketInfo) return { bid: 0, ask: 0, mid: 0 };
+    const isUp = activeOutcome === 'UP';
+    const bid = parseFloat(isUp ? (marketInfo.upBid || marketInfo.yesBid || '0') : (marketInfo.downBid || marketInfo.noBid || '0'));
+    const ask = parseFloat(isUp ? (marketInfo.upAsk || marketInfo.yesAsk || '0') : (marketInfo.downAsk || marketInfo.noAsk || '0'));
+    const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : parseFloat(isUp ? (marketInfo.upPrice || marketInfo.yesPrice || '0.50') : (marketInfo.downPrice || marketInfo.noPrice || '0.50'));
+    return { bid, ask, mid };
+  };
+
+  const formatCents = (value: number) => Number.isFinite(value) && value > 0 ? `${Math.round(value * 100)}¢` : '--';
+
+  const handleOneTapOrder = (side: Side) => {
+    const { bid, ask, mid } = getActiveQuote();
+    const referencePrice = side === 'BUY' ? (ask || mid) : (bid || mid);
+    const capturedSize = side === 'BUY'
+      ? (referencePrice > 0 ? (buySpendNum / referencePrice).toFixed(4) : '0')
+      : (sellShares || availableShares.toFixed(4));
+    const capturedUsd = side === 'BUY' ? buyUsdSpend : undefined;
+
+    if (!activeTokenId || referencePrice <= 0) return;
+    setError('');
+    clearBackendError?.();
+    setIsSubmitting(true);
+    sendMessage({
+      type: 'PLACE_ORDER',
+      id: crypto.randomUUID(),
+      payload: {
+        tokenId: activeTokenId,
+        outcome: activeOutcome,
+        side,
+        dollarSpend: capturedUsd,
+        size: capturedSize,
+        price: referencePrice.toFixed(2),
+        executionMode: 'ONE_TAP',
+        orderType: 'FAK',
+        slippageBps,
       }
     });
   };
@@ -192,6 +237,11 @@ const TradingPanel: React.FC<Props> = ({
   };
 
   const isExecutionBlocked: boolean = !readiness || (readiness.blockingReasons && readiness.blockingReasons.length > 0) || !readiness.liveArmed;
+  const activeQuote = getActiveQuote();
+  const oneTapBuyShares = activeQuote.ask > 0 ? buySpendNum / activeQuote.ask : 0;
+  const oneTapSellShares = parseFloat(sellShares || availableShares.toFixed(4)) || 0;
+  const oneTapBuyValid = hasEnoughBalance && oneTapBuyShares > 0 && (minimumOrderSize <= 0 || oneTapBuyShares >= minimumOrderSize);
+  const oneTapSellValid = oneTapSellShares > 0 && oneTapSellShares <= availableShares && (minimumOrderSize <= 0 || oneTapSellShares >= minimumOrderSize);
 
   return (
     <div className="flex flex-col gap-3 font-sans text-xs">
@@ -320,6 +370,27 @@ const TradingPanel: React.FC<Props> = ({
       )}
 
       {/* Outcome Switcher */}
+      <div className="bg-gray-800 p-1 rounded border border-gray-700 grid grid-cols-2 gap-1">
+        <button
+          onClick={() => setExecutionMode('MAKER')}
+          className={`py-1.5 rounded text-[11px] font-bold uppercase flex items-center justify-center gap-1 ${
+            executionMode === 'MAKER' ? 'bg-blue-700 text-white' : 'text-gray-400 hover:bg-gray-700'
+          }`}
+          title="Place post-only resting limit orders"
+        >
+          Maker
+        </button>
+        <button
+          onClick={() => setExecutionMode('ONE_TAP')}
+          className={`py-1.5 rounded text-[11px] font-bold uppercase flex items-center justify-center gap-1 ${
+            executionMode === 'ONE_TAP' ? 'bg-yellow-600 text-gray-950' : 'text-gray-400 hover:bg-gray-700'
+          }`}
+          title="Use a FAK market order with slippage protection"
+        >
+          <Zap size={12} /> One Tap
+        </button>
+      </div>
+
       <div className="flex gap-1.5">
         <button 
           onClick={() => setActiveOutcome('UP')}
@@ -384,8 +455,8 @@ const TradingPanel: React.FC<Props> = ({
         )}
 
         {/* Dynamic BUY Price Buttons */}
-        <div className="text-[10px] text-gray-400 font-bold pt-1 border-t border-gray-700">BUY {activeOutcome} MAKER PRESETS</div>
-        <div className="grid grid-cols-3 gap-1.5">
+        {executionMode === 'MAKER' && <div className="text-[10px] text-gray-400 font-bold pt-1 border-t border-gray-700">BUY {activeOutcome} MAKER PRESETS</div>}
+        {executionMode === 'MAKER' && <div className="grid grid-cols-3 gap-1.5">
           {activePresets.filter(p => p.side === 'BUY' && p.active).map(preset => {
             const price = calculatePresetPrice(preset);
             const priceNum = price ? parseFloat(price) : 0.5;
@@ -407,7 +478,7 @@ const TradingPanel: React.FC<Props> = ({
               </button>
             );
           })}
-        </div>
+        </div>}
       </div>
 
       {/* SELL Sizing Section */}
@@ -443,8 +514,8 @@ const TradingPanel: React.FC<Props> = ({
         </div>
 
         {/* Dynamic SELL Price Buttons */}
-        <div className="text-[10px] text-gray-400 font-bold pt-1 border-t border-gray-700">SELL {activeOutcome} MAKER PRESETS</div>
-        <div className="grid grid-cols-3 gap-1.5">
+        {executionMode === 'MAKER' && <div className="text-[10px] text-gray-400 font-bold pt-1 border-t border-gray-700">SELL {activeOutcome} MAKER PRESETS</div>}
+        {executionMode === 'MAKER' && <div className="grid grid-cols-3 gap-1.5">
           {activePresets.filter(p => p.side === 'SELL' && p.active).map(preset => {
             const price = calculatePresetPrice(preset);
             const sharesToSell = sellShares || availableShares.toFixed(1);
@@ -465,8 +536,68 @@ const TradingPanel: React.FC<Props> = ({
               </button>
             );
           })}
-        </div>
+        </div>}
       </div>
+
+      {executionMode === 'ONE_TAP' && (
+        <div className="bg-yellow-950/30 p-2.5 rounded border border-yellow-700/70 flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 text-yellow-300 font-bold uppercase text-[11px]">
+              <Zap size={12} />
+              One Tap FAK
+            </div>
+            <div className="flex items-center gap-1 text-[10px] font-mono text-gray-300">
+              <span>Slip</span>
+              {[50, 100, 200].map(value => (
+                <button
+                  key={value}
+                  onClick={() => setSlippageBps(value)}
+                  className={`px-1.5 py-0.5 rounded border ${slippageBps === value ? 'bg-yellow-600 border-yellow-400 text-gray-950 font-bold' : 'bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700'}`}
+                >
+                  {(value / 100).toFixed(value % 100 === 0 ? 0 : 1)}%
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-1.5 text-[10px] font-mono">
+            <div className="bg-gray-900/80 border border-gray-700 rounded p-1.5">
+              <div className="text-gray-500">BUY REF</div>
+              <div className="text-green-300 font-bold">{formatCents(activeQuote.ask || activeQuote.mid)}</div>
+            </div>
+            <div className="bg-gray-900/80 border border-gray-700 rounded p-1.5">
+              <div className="text-gray-500">SELL REF</div>
+              <div className="text-red-300 font-bold">{formatCents(activeQuote.bid || activeQuote.mid)}</div>
+            </div>
+            <div className="bg-gray-900/80 border border-gray-700 rounded p-1.5">
+              <div className="text-gray-500">MODE</div>
+              <div className="text-yellow-300 font-bold">FAK</div>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              onPointerDown={() => handleOneTapOrder('BUY')}
+              disabled={isExecutionBlocked || isSubmitting || !oneTapBuyValid || activeQuote.ask <= 0}
+              className="bg-green-700 hover:bg-green-600 disabled:opacity-40 py-2.5 rounded text-center font-mono font-bold text-white border border-green-500/60 shadow flex flex-col items-center justify-center"
+              title={`Market buy up to $${buyUsdSpend}; estimated ${oneTapBuyShares.toFixed(2)} shares`}
+            >
+              <span className="text-sm">BUY {activeOutcome}</span>
+              <span className="text-[9px] text-green-200 font-normal">${buyUsdSpend} now</span>
+            </button>
+            <button
+              onPointerDown={() => handleOneTapOrder('SELL')}
+              disabled={isExecutionBlocked || isSubmitting || !oneTapSellValid || activeQuote.bid <= 0}
+              className="bg-red-700 hover:bg-red-600 disabled:opacity-40 py-2.5 rounded text-center font-mono font-bold text-white border border-red-500/60 shadow flex flex-col items-center justify-center"
+              title={`Market sell ${oneTapSellShares.toFixed(4)} shares`}
+            >
+              <span className="text-sm">SELL {activeOutcome}</span>
+              <span className="text-[9px] text-red-200 font-normal">{oneTapSellShares.toFixed(2)} sh now</span>
+            </button>
+          </div>
+          {minimumOrderSize > 0 && !oneTapBuyValid && buySpendNum > 0 && (
+            <div className="text-[10px] text-yellow-300 font-mono">Buy size estimates below the {minimumOrderSize} share minimum at current ask.</div>
+          )}
+        </div>
+      )}
 
       {(error || backendError) && (
         <div className="bg-red-900/80 border border-red-500 text-red-200 p-2 rounded text-xs font-mono">

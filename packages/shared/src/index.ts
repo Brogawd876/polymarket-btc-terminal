@@ -33,6 +33,9 @@ export type OrderState = z.infer<typeof OrderStateSchema>;
 export const SideSchema = z.enum(['BUY', 'SELL']);
 export type Side = z.infer<typeof SideSchema>;
 
+export const ExecutionModeSchema = z.enum(['MAKER', 'ONE_TAP']);
+export type ExecutionMode = z.infer<typeof ExecutionModeSchema>;
+
 export const OutcomeSchema = z.enum(['UP', 'DOWN']);
 export type Outcome = z.infer<typeof OutcomeSchema>;
 
@@ -132,6 +135,8 @@ export const OrderSchema = z.object({
   dollarSpend: StringAmountSchema.optional(),
   size: StringAmountSchema, // requested shares
   price: StringAmountSchema, // limit price
+  executionMode: ExecutionModeSchema.optional(),
+  orderType: z.enum(['GTC', 'FAK', 'FOK']).optional(),
   presetId: z.string().optional(),
   filledShares: StringAmountSchema.default('0'),
   remainingShares: StringAmountSchema.optional(),
@@ -355,8 +360,10 @@ export const WsEventSchema = z.discriminatedUnion('type', [
       dollarSpend: z.string().optional(),
       size: StringAmountSchema,
       price: StringAmountSchema,
+      executionMode: ExecutionModeSchema.optional(),
       presetId: z.string().optional(),
-      orderType: z.enum(['GTC']).default('GTC'),
+      orderType: z.enum(['GTC', 'FAK', 'FOK']).default('GTC'),
+      slippageBps: z.number().optional(),
     }),
   }).merge(BaseMessageSchema),
 

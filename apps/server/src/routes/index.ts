@@ -14,7 +14,9 @@ const PlaceOrderSchema = z.object({
   price: z.string().regex(/^0\.(\d+)$/).refine(v => parseFloat(v) > 0 && parseFloat(v) < 1),
   size: z.string().refine(v => parseFloat(v) > 0 && parseFloat(v) <= 100000),
   presetId: z.string().optional(),
-  orderType: z.enum(['GTC']).optional().default('GTC')
+  executionMode: z.enum(['MAKER', 'ONE_TAP']).optional().default('MAKER'),
+  orderType: z.enum(['GTC', 'FAK']).optional().default('GTC'),
+  slippageBps: z.number().min(0).max(1000).optional().default(100)
 });
 
 const CancelOrderSchema = z.object({
@@ -378,7 +380,7 @@ export async function registerRoutes(app: FastifyInstance) {
             return;
           }
 
-          const { tokenId, outcome, side, dollarSpend, size, price, presetId } = validation.data;
+          const { tokenId, outcome, side, dollarSpend, size, price, presetId, executionMode, slippageBps } = validation.data;
           const requestedShares = parseFloat(size);
           const requestedPrice = parseFloat(price);
           const requestedSpend = dollarSpend ? parseFloat(dollarSpend) : requestedShares * requestedPrice;
@@ -426,7 +428,9 @@ export async function registerRoutes(app: FastifyInstance) {
             db.prepare(`UPDATE idempotency SET status='SUBMITTING', updatedAt=? WHERE requestId=?`).run(Date.now(), requestId);
 
             if (!adapter) throw new Error('Adapter not initialized');
-            const order = await adapter.placeOrder(tokenId, side, size, price);
+            const order = executionMode === 'ONE_TAP'
+              ? await adapter.placeMarketOrder(tokenId, side, side === 'BUY' ? String(requestedSpend) : size, slippageBps)
+              : await adapter.placeOrder(tokenId, side, size, price);
             order.clientRequestId = requestId;
             order.outcome = outcome;
             order.dollarSpend = dollarSpend;

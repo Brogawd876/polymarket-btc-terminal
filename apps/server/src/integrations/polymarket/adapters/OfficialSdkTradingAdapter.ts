@@ -650,6 +650,90 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
     }
   }
 
+  async placeMarketOrder(tokenId: string, side: Side, amount: string, slippageBps: number = 100): Promise<Order> {
+    if (!this.isConnected) throw new TradingError('Adapter not connected', 'ADAPTER_NOT_CONNECTED');
+
+    let tickSizeStr = '0.01';
+    try {
+      tickSizeStr = await this.clobClient.getTickSize(tokenId);
+    } catch (e) {
+      console.warn('Using default tick size 0.01');
+    }
+    const normalizedTickSize = normalizeTickSize(tickSizeStr);
+    const tickSize = parseFloat(normalizedTickSize) || 0.01;
+    const precision = tickSizeStr.includes('.') ? tickSizeStr.split('.')[1].length : 2;
+    const requestedAmount = parseFloat(amount);
+    if (!Number.isFinite(requestedAmount) || requestedAmount <= 0) {
+      throw new TradingError('Market order amount must be greater than zero', 'INVALID_MARKET_AMOUNT');
+    }
+
+    const orderSide = side === 'BUY' ? ClobSide.BUY : ClobSide.SELL;
+    const orderType: OrderType.FAK = OrderType.FAK;
+    const estimatedPrice = await this.clobClient.calculateMarketPrice(tokenId, orderSide, requestedAmount, orderType);
+    const slippageMultiplier = Math.max(0, slippageBps) / 10000;
+    const limitPrice = side === 'BUY'
+      ? estimatedPrice * (1 + slippageMultiplier)
+      : estimatedPrice * (1 - slippageMultiplier);
+    const roundedPrice = Math.round(limitPrice / tickSize) * tickSize;
+
+    if (roundedPrice < tickSize || roundedPrice > 1 - tickSize) {
+      throw new TradingError(`One-tap limit price ${roundedPrice.toFixed(precision)} is outside valid range`, 'INVALID_MARKET_PRICE');
+    }
+
+    const orderArgs = {
+      tokenID: tokenId,
+      amount: Number(requestedAmount.toFixed(6)),
+      side: orderSide,
+      price: Number(roundedPrice.toFixed(precision)),
+      orderType,
+    };
+
+    try {
+      const response = await this.clobClient.createAndPostMarketOrder(
+        orderArgs,
+        { tickSize: normalizedTickSize },
+        orderType
+      );
+      console.log(`Polymarket CLOB market order response: ${JSON.stringify(response)}`);
+
+      if ((response as any).error || (response as any).errorMsg || !(response as any).success) {
+        const reason = (response as any).errorMsg || (response as any).error || (response as any).status || JSON.stringify(response);
+        throw new TradingError(`Polymarket API rejected market order: ${reason}`, 'API_REJECTED_MARKET_ORDER');
+      }
+
+      const status = String(response.status || '').toLowerCase();
+      const filledShares = side === 'BUY'
+        ? String((response as any).takingAmount || '0')
+        : String((response as any).makingAmount || '0');
+      const order: Order = {
+        id: response.orderID || `market_${Date.now().toString(16)}`,
+        remoteOrderId: response.orderID,
+        tokenId,
+        side,
+        dollarSpend: side === 'BUY' ? amount : undefined,
+        size: side === 'BUY' ? filledShares : requestedAmount.toFixed(4),
+        price: roundedPrice.toFixed(precision),
+        filledShares,
+        fees: '0',
+        status: status === 'matched' ? 'FILLED' : status === 'delayed' ? 'ACCEPTED' : response.success ? 'ACCEPTED' : 'REJECTED',
+        state: status === 'matched' ? 'FILLED' : status === 'delayed' ? 'ACCEPTED' : response.success ? 'ACCEPTED' : 'REJECTED',
+        timestamp: Date.now(),
+        createdAt: Date.now(),
+      };
+
+      await this.reconcileRecentTrades();
+      setTimeout(() => this.reconcileRecentTrades().catch(err => console.error('Delayed market-order reconciliation failed:', err)), 2500);
+      setTimeout(() => this.reconcileRecentTrades().catch(err => console.error('Delayed market-order reconciliation failed:', err)), 7500);
+
+      console.log(`Placed market order: ${JSON.stringify(order)}`);
+      return order;
+    } catch (error: any) {
+      console.error('Error placing market order:', error);
+      if (error instanceof TradingError) throw error;
+      throw new TradingError(error.message, 'UNKNOWN_MARKET_ORDER_ERROR');
+    }
+  }
+
   async cancelOrder(orderId: string): Promise<boolean> {
     if (!this.isConnected) throw new TradingError('Adapter not connected', 'ADAPTER_NOT_CONNECTED');
     try {
