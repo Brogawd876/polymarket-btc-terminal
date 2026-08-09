@@ -55,7 +55,9 @@ export function evaluateReadiness(activeMarket: any): LiveReadiness {
   const publicMarketConnected = !!activeMarket;
   const referenceConnected = rtds.connected;
   const selectedMarketValid = !!activeMarket && !!activeMarket.conditionId;
-  const currentWindowValid = !!activeMarket && (activeMarket.targetTime ? activeMarket.targetTime > Date.now() : true);
+  const currentWindowValid = !!activeMarket
+    && (activeMarket.startTime ? activeMarket.startTime <= Date.now() : true)
+    && (activeMarket.targetTime ? activeMarket.targetTime > Date.now() : true);
   const accountConfigured = enableLive && !!process.env.PRIVATE_KEY;
   const accountAuthenticated = adapter ? adapter.getIsConnected() : false;
   const userStreamConnected = adapter ? adapter.getUserStreamConnected() : false;

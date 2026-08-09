@@ -81,13 +81,12 @@ export default defineBackground(() => {
   };
 
   const connect = async () => {
-    if (!currentToken) {
-      const token = await fetchToken();
-      if (token) currentToken = token;
-      else {
-        reconnectTimeout = setTimeout(connect, 3000);
-        return;
-      }
+    const token = await fetchToken();
+    if (token) {
+      currentToken = token;
+    } else {
+      reconnectTimeout = setTimeout(connect, 3000);
+      return;
     }
 
     ws = new WebSocket('ws://127.0.0.1:3001/ws');
@@ -113,6 +112,7 @@ export default defineBackground(() => {
           } else if (data.type === 'AUTH_ERROR') {
             isAuthenticated = false;
             currentToken = ''; 
+            snapshotState = null;
             ws?.close();
           } else if (data.type === 'SNAPSHOT') {
             snapshotState = data.payload;
@@ -133,6 +133,8 @@ export default defineBackground(() => {
 
     ws.onclose = () => {
       isAuthenticated = false;
+      currentToken = '';
+      snapshotState = null;
       stopKeepAlive();
       broadcast({ type: 'WS_STATUS', payload: false });
       clearTimeout(reconnectTimeout);

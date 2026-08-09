@@ -50,15 +50,32 @@ export class DiscoveryService {
   }
 
   getMarkets(): MarketState[] {
-    return this.latestMarkets;
+    return this.withCurrentTypes(this.latestMarkets);
   }
 
   getCurrentMarket(): MarketState | null {
-    return this.latestMarkets.find(m => m.type === 'CURRENT') || this.latestMarkets[0] || null;
+    const markets = this.withCurrentTypes(this.latestMarkets);
+    return markets.find(m => m.type === 'CURRENT')
+      || markets.find(m => m.type === 'NEXT')
+      || null;
   }
 
   getNextMarket(): MarketState | null {
-    return this.latestMarkets.find(m => m.type === 'NEXT') || null;
+    return this.withCurrentTypes(this.latestMarkets).find(m => m.type === 'NEXT') || null;
+  }
+
+  private withCurrentTypes(markets: MarketState[]): MarketState[] {
+    const now = Date.now();
+    return markets.map(market => {
+      let type: 'PREVIOUS' | 'CURRENT' | 'NEXT' = 'PREVIOUS';
+      if (market.startTime && now < market.startTime) {
+        type = 'NEXT';
+      } else if (market.targetTime && now < market.targetTime) {
+        type = 'CURRENT';
+      }
+
+      return { ...market, type };
+    });
   }
 
   start() {

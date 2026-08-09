@@ -41,7 +41,17 @@ export function useWebSocket(url: string) {
     port.onMessage.addListener((message: any) => {
       if (message.type === 'WS_STATUS') {
         setConnected(message.payload);
-        if (!message.payload) setOperationalState('OFFLINE');
+        if (!message.payload) {
+          setOperationalState('OFFLINE');
+          setReadiness(null);
+          setMarketInfo(null);
+          setAnchor(null);
+          setRtdsPrice(null);
+          setRtdsMetrics({ connected: false, stale: true, dataAgeMs: 0 });
+          setLastError('Backend connection lost. Reconnecting...');
+        } else {
+          setLastError('');
+        }
       } else if (message.type === 'WS_EVENT') {
         const data = message.payload;
         if (data.type === 'SNAPSHOT') {
