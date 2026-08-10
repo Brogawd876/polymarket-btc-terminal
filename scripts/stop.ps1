@@ -1,20 +1,25 @@
 $ErrorActionPreference = "Stop"
 
-Write-Host "Searching for Polymarket Terminal backend process..."
-$procs = Get-Process -Name node -ErrorAction SilentlyContinue | Where-Object { 
-    $_.CommandLine -like "*@polymarket-btc/server*" -or 
-    $_.CommandLine -like "*apps/server*" -or 
-    $_.CommandLine -like "*dist/bundle.js*" 
+$Port = 3001
+
+Write-Host ""
+Write-Host "Stopping Polymarket BTC Terminal..." -ForegroundColor White
+
+try {
+    $listeners = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop
+} catch {
+    $listeners = @()
 }
 
-if (-not $procs) {
-    Write-Host "No active Polymarket Terminal backend process found."
+if (-not $listeners) {
+    Write-Host "Backend is already stopped." -ForegroundColor Green
     exit 0
 }
 
-foreach ($p in $procs) {
-    Write-Host "Gracefully stopping process PID $($p.Id)..."
-    Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+foreach ($listener in $listeners) {
+    Write-Host "Stopping backend PID $($listener.OwningProcess) on port $Port..."
+    Stop-Process -Id $listener.OwningProcess -Force -ErrorAction SilentlyContinue
 }
 
-Write-Host "Polymarket Terminal backend shutdown complete."
+Start-Sleep -Seconds 1
+Write-Host "Backend stopped." -ForegroundColor Green

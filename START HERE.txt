@@ -1,0 +1,20 @@
+Polymarket BTC Terminal
+
+Normal startup:
+1. Double-click start.bat.
+2. Wait for the green backend success message.
+3. Chrome opens the current BTC 5-minute Polymarket market.
+4. If the panel is missing or looks old, reload the Chrome extension:
+   - Open chrome://extensions
+   - Find extension ID jkpghfeaioigocjjdfeeocfjilhjbdno
+   - Click Reload
+   - Refresh the Polymarket tab
+
+Useful buttons:
+- start.bat starts or restarts the app.
+- STATUS.bat checks whether the backend is healthy.
+- STOP.bat stops the backend.
+
+Expected safety state after startup:
+- The backend usually starts as LIVE_DISARMED.
+- That is intentional. Arm live inside the panel only when you are ready.

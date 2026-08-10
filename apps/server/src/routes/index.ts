@@ -234,6 +234,15 @@ export async function registerRoutes(app: FastifyInstance) {
     return { operationalState: state, readiness };
   });
 
+  app.post('/api/v1/live/disarm', async () => {
+    const globalDiscoveryService = (globalThis as any).discoveryService;
+    const currentMarket = globalDiscoveryService ? globalDiscoveryService.getCurrentMarket() : null;
+    disarmLive();
+    const readiness = evaluateReadiness(currentMarket);
+    const state = determineOperationalState(readiness, currentMarket);
+    return { success: true, operationalState: state, readiness };
+  });
+
   app.get('/api/v1/presets', async () => {
     const db = getDb();
     const rows = db.prepare('SELECT * FROM presets').all() as any[];
