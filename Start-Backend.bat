@@ -1,5 +1,4 @@
 @echo off
 title Polymarket BTC Terminal Backend
-echo Starting the production backend server...
-pnpm run start:prod
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start.ps1"
 pause
