@@ -246,7 +246,7 @@ const TradingPanel: React.FC<Props> = ({
     return targetPrice.toFixed(2);
   };
 
-  const isExecutionBlocked: boolean = pageMarketMismatch || !readiness || (readiness.blockingReasons && readiness.blockingReasons.length > 0) || !readiness.liveArmed;
+  const isExecutionBlocked: boolean = !readiness || (readiness.blockingReasons && readiness.blockingReasons.length > 0) || !readiness.liveArmed;
   const activeQuote = getActiveQuote();
   const oneTapBuyShares = activeQuote.ask > 0 ? buySpendNum / activeQuote.ask : 0;
   const oneTapSellShares = parseFloat(sellShares || availableShares.toFixed(4)) || 0;
@@ -301,7 +301,7 @@ const TradingPanel: React.FC<Props> = ({
           <div className="bg-yellow-950/80 border border-yellow-700 p-1.5 rounded text-[10px] text-yellow-200 font-mono flex items-center justify-between gap-2">
             <div className="flex items-start gap-1">
               <AlertTriangle size={10} className="shrink-0 mt-0.5" />
-              <span>PAGE MARKET MISMATCH</span>
+              <span>POLYMARKET PAGE LAGGING; TERMINAL TRADES CURRENT MARKET</span>
             </div>
             <button
               onClick={openPanelMarket}
