@@ -172,13 +172,20 @@ const TradingPanel: React.FC<Props> = ({
   };
 
   const formatCents = (value: number) => Number.isFinite(value) && value > 0 ? `${Math.round(value * 100)}¢` : '--';
+  const floorToDecimals = (value: number, decimals: number) => {
+    if (!Number.isFinite(value) || value <= 0) return (0).toFixed(decimals);
+    const scale = 10 ** decimals;
+    return (Math.floor(value * scale) / scale).toFixed(decimals);
+  };
+  const defaultSellShares = floorToDecimals(availableShares, 4);
+  const formatHeldShares = (value: number) => floorToDecimals(value, 4);
 
   const handleOneTapOrder = (side: Side) => {
     const { bid, ask, mid } = getActiveQuote();
     const referencePrice = side === 'BUY' ? (ask || mid) : (bid || mid);
     const capturedSize = side === 'BUY'
       ? (referencePrice > 0 ? (buySpendNum / referencePrice).toFixed(4) : '0')
-      : (sellShares || availableShares.toFixed(4));
+      : (sellShares || defaultSellShares);
     const capturedUsd = side === 'BUY' ? buyUsdSpend : undefined;
 
     if (!activeTokenId || referencePrice <= 0) return;
@@ -249,7 +256,7 @@ const TradingPanel: React.FC<Props> = ({
   const isExecutionBlocked: boolean = !readiness || (readiness.blockingReasons && readiness.blockingReasons.length > 0) || !readiness.liveArmed;
   const activeQuote = getActiveQuote();
   const oneTapBuyShares = activeQuote.ask > 0 ? buySpendNum / activeQuote.ask : 0;
-  const oneTapSellShares = parseFloat(sellShares || availableShares.toFixed(4)) || 0;
+  const oneTapSellShares = parseFloat(sellShares || defaultSellShares) || 0;
   const oneTapBuyValid = hasEnoughBalance && oneTapBuyShares > 0 && (minimumOrderSize <= 0 || oneTapBuyShares >= minimumOrderSize);
   const oneTapSellValid = oneTapSellShares > 0 && oneTapSellShares <= availableShares && (minimumOrderSize <= 0 || oneTapSellShares >= minimumOrderSize);
 
@@ -511,14 +518,14 @@ const TradingPanel: React.FC<Props> = ({
       <div className="bg-gray-800 p-2.5 rounded border border-gray-700 flex flex-col gap-2">
         <div className="flex justify-between items-center text-[11px]">
           <span className="font-bold text-red-400 uppercase">SELL SIZING ({activeOutcome} POSITION)</span>
-          <span className="text-gray-400 font-mono">HELD: {availableShares.toFixed(1)} SHARES</span>
+          <span className="text-gray-400 font-mono">HELD: {formatHeldShares(availableShares)} SHARES</span>
         </div>
         <div className="flex gap-1">
           {['25', '50', '100'].map(pct => (
             <button
               key={pct}
               onClick={() => {
-                const calculated = (availableShares * (parseFloat(pct) / 100)).toFixed(1);
+                const calculated = floorToDecimals(availableShares * (parseFloat(pct) / 100), 4);
                 setSellShares(calculated);
               }}
               disabled={availableShares <= 0}
@@ -544,7 +551,7 @@ const TradingPanel: React.FC<Props> = ({
         {executionMode === 'MAKER' && <div className="grid grid-cols-3 gap-1.5">
           {activePresets.filter(p => p.side === 'SELL' && p.active).map(preset => {
             const price = calculatePresetPrice(preset);
-            const sharesToSell = sellShares || availableShares.toFixed(1);
+            const sharesToSell = sellShares || defaultSellShares;
             const sharesToSellNum = parseFloat(sharesToSell) || 0;
             const priceCents = price ? Math.round(parseFloat(price) * 100) : '-';
             const sellSizeValid = sharesToSellNum > 0 && sharesToSellNum <= availableShares && (minimumOrderSize <= 0 || sharesToSellNum >= minimumOrderSize);

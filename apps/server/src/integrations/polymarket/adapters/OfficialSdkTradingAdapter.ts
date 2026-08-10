@@ -636,8 +636,12 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
     
     const p = parseFloat(price);
     const s = parseFloat(size);
+    const sizePrecision = 4;
     let targetPrice = Math.round(p / tickSize) * tickSize;
-    const roundedSize = Math.round(s / tickSize) * tickSize;
+    const sizeScale = 10 ** sizePrecision;
+    const roundedSize = side === 'SELL'
+      ? Math.floor(s * sizeScale) / sizeScale
+      : Math.round(s * sizeScale) / sizeScale;
 
     try {
       const liveBook = await this.clobClient.getOrderBook(tokenId);
@@ -666,7 +670,7 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
       tokenID: tokenId,
       price: Number(roundedPrice.toFixed(precision)),
       side: side === 'BUY' ? ClobSide.BUY : ClobSide.SELL,
-      size: Number(roundedSize.toFixed(precision)),
+      size: Number(roundedSize.toFixed(sizePrecision)),
       feeRateBps: 0,
       nonce: 0,
     };
@@ -690,7 +694,7 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
         remoteOrderId: response.orderID,
         tokenId,
         side,
-        size: roundedSize.toFixed(precision),
+        size: roundedSize.toFixed(sizePrecision),
         price: roundedPrice.toFixed(precision),
         filledShares: '0',
         fees: '0',
@@ -881,6 +885,20 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
     }
   }
 
+  async getTokenBalance(tokenId: string): Promise<number> {
+    if (!this.wallet || !this.clobClient || !tokenId) return 0;
+    try {
+      const balanceAllowance = await this.clobClient.getBalanceAllowance({
+        asset_type: AssetType.CONDITIONAL,
+        token_id: tokenId
+      });
+      return this.parseTokenBalance(balanceAllowance.balance);
+    } catch (e) {
+      console.error(`Failed to fetch CLOB conditional-token balance for ${tokenId}`, e);
+      return 0;
+    }
+  }
+
   async getAccountState(): Promise<AccountState> {
     const balance = await this.getBalance();
     let allowanceValid = true;
@@ -904,6 +922,12 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
   }
 
   private parseCollateralBalance(balance: string): number {
+    const parsed = parseFloat(balance);
+    if (!Number.isFinite(parsed)) return 0;
+    return parsed > 100000 ? parsed / 1_000_000 : parsed;
+  }
+
+  private parseTokenBalance(balance: string): number {
     const parsed = parseFloat(balance);
     if (!Number.isFinite(parsed)) return 0;
     return parsed > 100000 ? parsed / 1_000_000 : parsed;

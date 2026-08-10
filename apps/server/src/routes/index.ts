@@ -35,6 +35,7 @@ let liveArmedState = false;
 let armTimeout: NodeJS.Timeout | null = null;
 const PANEL_ORDER_RECENCY_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_ORDER_STATUS_SQL = "'PENDING','OPEN','NEW','LIVE','SUBMITTING','ACCEPTED','PARTIALLY_FILLED','CANCEL_PENDING','RECONCILING'";
+const POSITION_EPSILON = 0.000001;
 
 function normalizeOrderRow(row: any): any {
   if (!row) return row;
@@ -129,6 +130,53 @@ function subscribeAdapterToMarket(market: any) {
   if (market.conditionId && upToken && downToken) {
     adapter.subscribeToMarket(market.conditionId, upToken, downToken);
   }
+}
+
+async function getAvailableShares(db: any, tokenId: string): Promise<number> {
+  const position = db.prepare(`SELECT netSize FROM positions WHERE tokenId = ?`).get(tokenId) as { netSize?: string } | undefined;
+  const localShares = parseFloat(position?.netSize || '0');
+
+  if (adapter) {
+    const remoteShares = await adapter.getTokenBalance(tokenId);
+    return Number.isFinite(remoteShares) ? Math.max(0, remoteShares) : 0;
+  }
+
+  return Number.isFinite(localShares) ? Math.max(0, localShares) : 0;
+}
+
+async function getPanelPositions(db: any, market?: any): Promise<any[]> {
+  const rows = db.prepare(`SELECT * FROM positions WHERE CAST(netSize AS REAL) > 0`).all() as any[];
+  const byToken = new Map<string, any>(rows.map(position => [position.tokenId, position]));
+  const marketTokens = [
+    { tokenId: market?.upTokenId || market?.yesTokenId, outcome: 'UP' },
+    { tokenId: market?.downTokenId || market?.noTokenId, outcome: 'DOWN' },
+  ].filter(token => token.tokenId);
+
+  for (const marketToken of marketTokens) {
+    const remoteShares = adapter ? await adapter.getTokenBalance(marketToken.tokenId) : 0;
+    if (!Number.isFinite(remoteShares) || remoteShares <= POSITION_EPSILON) {
+      byToken.delete(marketToken.tokenId);
+      continue;
+    }
+
+    const existing = byToken.get(marketToken.tokenId);
+    byToken.set(marketToken.tokenId, {
+      ...(existing || {}),
+      tokenId: marketToken.tokenId,
+      conditionId: market?.conditionId || existing?.conditionId || '',
+      outcome: existing?.outcome || marketToken.outcome,
+      netSize: String(remoteShares),
+      netShares: String(remoteShares),
+      availableShares: String(remoteShares),
+      avgPrice: existing?.avgPrice || '0',
+      fees: existing?.fees || '0',
+      unrealizedPnl: existing?.unrealizedPnl || 0,
+      realizedPnl: existing?.realizedPnl || 0,
+      updatedAt: Date.now(),
+    });
+  }
+
+  return [...byToken.values()].filter(position => parseFloat(position.netSize || '0') > POSITION_EPSILON);
 }
 
 function armLive(durationMs: number = 300000) {
@@ -303,7 +351,9 @@ export async function registerRoutes(app: FastifyInstance) {
 
   app.get('/api/positions', async () => {
     const db = getDb();
-    return db.prepare(`SELECT * FROM positions WHERE CAST(netSize AS REAL) > 0`).all();
+    const globalDiscoveryService = (globalThis as any).discoveryService;
+    const currentMarket = globalDiscoveryService ? globalDiscoveryService.getCurrentMarket() : null;
+    return getPanelPositions(db, currentMarket);
   });
 
   app.get('/api/balance', async () => {
@@ -340,7 +390,7 @@ export async function registerRoutes(app: FastifyInstance) {
           const activeMarket = markets.find((market: any) => market.conditionId === activeMarketId) || currentMarket;
           const readiness = evaluateReadiness(activeMarket);
           const operationalState = determineOperationalState(readiness, activeMarket);
-          const positions = db.prepare(`SELECT * FROM positions WHERE CAST(netSize AS REAL) > 0`).all() as any[];
+          const positions = await getPanelPositions(db, activeMarket);
           const orders = getPanelOrders(db);
           const balance = adapter ? await adapter.getBalance() : 0;
           const updateMarkets = markets.map((market: any) => market.conditionId === state.conditionId ? state : market);
@@ -428,7 +478,7 @@ export async function registerRoutes(app: FastifyInstance) {
             : discoveredMarkets;
 
           const orders = getPanelOrders(db);
-          const positions = db.prepare(`SELECT * FROM positions WHERE CAST(netSize AS REAL) > 0`).all() as any[];
+          const positions = await getPanelPositions(db, refreshedMarket || currentMarket);
           const balance = adapter ? await adapter.getBalance() : 0;
           const account = adapter ? await adapter.getAccountState() : undefined;
           
@@ -525,9 +575,8 @@ export async function registerRoutes(app: FastifyInstance) {
               return;
             }
           } else {
-            const position = db.prepare(`SELECT netSize FROM positions WHERE tokenId = ?`).get(tokenId) as { netSize?: string } | undefined;
-            const availableShares = parseFloat(position?.netSize || '0');
-            if (!Number.isFinite(requestedShares) || requestedShares <= 0 || requestedShares > availableShares) {
+            const availableShares = await getAvailableShares(db, tokenId);
+            if (!Number.isFinite(requestedShares) || requestedShares <= 0 || requestedShares > availableShares + POSITION_EPSILON) {
               db.prepare(`UPDATE idempotency SET status='FAILED', updatedAt=? WHERE requestId=?`).run(Date.now(), requestId);
               connection.socket.send(JSON.stringify({
                 type: 'ERROR',

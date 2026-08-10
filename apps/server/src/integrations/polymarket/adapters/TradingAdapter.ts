@@ -14,5 +14,6 @@ export abstract class TradingAdapter {
   abstract subscribeToMarket(conditionId: string, upTokenId: string, downTokenId: string): void;
   abstract updateMarketDiscovery(market: MarketState): void;
   abstract getBalance(): Promise<number>;
+  abstract getTokenBalance(tokenId: string): Promise<number>;
   abstract getAccountState(): Promise<AccountState>;
 }

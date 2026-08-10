@@ -29,6 +29,9 @@ export class RawTradingAdapter extends TradingAdapter {
   async getBalance(): Promise<number> {
     return 0;
   }
+  async getTokenBalance(_tokenId: string): Promise<number> {
+    return 0;
+  }
   async getAccountState(): Promise<AccountState> {
     return {
       collateralBalance: 0,
