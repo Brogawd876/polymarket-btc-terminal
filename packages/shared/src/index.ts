@@ -310,6 +310,14 @@ export const WsEventSchema = z.discriminatedUnion('type', [
   }).merge(BaseMessageSchema),
 
   z.object({
+    type: z.literal('PAGE_ANCHOR_UPDATE'),
+    payload: z.object({
+      slug: z.string(),
+      priceToBeat: z.string(),
+    })
+  }).merge(BaseMessageSchema),
+
+  z.object({
     type: z.literal('PRESET_PRICES_UPDATED'),
     payload: z.object({
       buyPrices: z.array(z.object({ presetId: z.string(), price: z.string(), label: z.string() })),

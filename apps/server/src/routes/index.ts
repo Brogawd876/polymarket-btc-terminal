@@ -3,7 +3,7 @@ import { adapter, getLocalAuthToken } from '../index';
 import { getDb } from '../db/index';
 import { z } from 'zod';
 import { SocketStream } from '@fastify/websocket';
-import { getRtdsMetrics, isRtdsStale, setActiveMarketAnchor, getMarketAnchor } from '../integrations/polymarket/rtds';
+import { getRtdsMetrics, isRtdsStale, setActiveMarketAnchor, setPageMarketAnchor, getMarketAnchor } from '../integrations/polymarket/rtds';
 import { LiveReadiness, OperationalState } from '@polymarket-btc/shared';
 
 const PlaceOrderSchema = z.object({
@@ -29,6 +29,14 @@ const SubscribeMarketSchema = z.object({
   noTokenId: z.string().optional(),
   upTokenId: z.string().optional(),
   downTokenId: z.string().optional(),
+});
+
+const PageAnchorSchema = z.object({
+  slug: z.string().min(1),
+  priceToBeat: z.string().refine(v => {
+    const parsed = parseFloat(v.replace(/,/g, ''));
+    return Number.isFinite(parsed) && parsed > 0;
+  }),
 });
 
 let liveArmedState = false;
@@ -681,6 +689,48 @@ export async function registerRoutes(app: FastifyInstance) {
               : null;
             setActiveMarketAnchor(validation.data.conditionId, selectedMarket?.startTime || Date.now());
           }
+        }
+        else if (payload.type === 'PAGE_ANCHOR_UPDATE') {
+          if (!isAuthenticated) return;
+
+          const validation = PageAnchorSchema.safeParse(payload.payload);
+          if (!validation.success) {
+            connection.socket.send(JSON.stringify({ type: 'ERROR', error: 'Invalid page anchor update', id: payload.id }));
+            return;
+          }
+
+          const markets = globalDiscoveryService ? globalDiscoveryService.getMarkets() : [];
+          const current = globalDiscoveryService ? globalDiscoveryService.getCurrentMarket() : null;
+          const selectedMarket = markets.find((market: any) => market.slug === validation.data.slug) || current;
+          if (!selectedMarket || selectedMarket.slug !== validation.data.slug) return;
+
+          const normalizedPrice = String(parseFloat(validation.data.priceToBeat.replace(/,/g, '')));
+          const anchor = setPageMarketAnchor(
+            selectedMarket.conditionId,
+            selectedMarket.startTime || Date.now(),
+            normalizedPrice
+          );
+          const readiness = evaluateReadiness(selectedMarket);
+          const operationalState = determineOperationalState(readiness, selectedMarket);
+          const metrics = getRtdsMetrics();
+          connection.socket.send(JSON.stringify({
+            type: 'SNAPSHOT',
+            id: payload.id,
+            payload: {
+              operationalState,
+              readiness,
+              market: selectedMarket,
+              anchor,
+              orders: getPanelOrders(db),
+              positions: await getPanelPositions(db, selectedMarket),
+              balance: adapter ? await adapter.getBalance() : 0,
+              markets,
+              realizedPnl: 0,
+              presets: (db.prepare('SELECT * FROM presets').all() as any[]).map(r => ({ id: r.id, name: r.name, ...JSON.parse(r.config) })),
+              settings: {}
+            }
+          }));
+          connection.socket.send(JSON.stringify({ type: 'REFERENCE_UPDATED', id: payload.id, payload: metrics }));
         }
       } catch (err: any) {
         connection.socket.send(JSON.stringify({ type: 'ERROR', error: err.message }));

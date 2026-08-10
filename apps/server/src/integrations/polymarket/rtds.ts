@@ -46,6 +46,19 @@ export function setActiveMarketAnchor(conditionId: string, windowStart: number, 
   return anchor;
 }
 
+export function setPageMarketAnchor(conditionId: string, windowStart: number, priceToBeat: string): MarketAnchor {
+  activeConditionId = conditionId;
+  const anchor = {
+    conditionId,
+    windowStart,
+    value: priceToBeat,
+    sourceTimestamp: Date.now(),
+    validated: parseFloat(priceToBeat) > 0
+  };
+  marketAnchors.set(conditionId, anchor);
+  return anchor;
+}
+
 export function getMarketAnchor(conditionId: string): MarketAnchor | undefined {
   return marketAnchors.get(conditionId);
 }

@@ -37,6 +37,33 @@ const App: React.FC = () => {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    const parsePriceToBeat = () => {
+      const lines = document.body.innerText.split('\n').map(line => line.trim()).filter(Boolean);
+      const labelIndex = lines.findIndex(line => /^Price To Beat$/i.test(line));
+      if (labelIndex < 0) return null;
+      for (const line of lines.slice(labelIndex + 1, labelIndex + 6)) {
+        const match = line.match(/\$?([0-9,]+\.\d{2,})/);
+        if (match) return match[1].replace(/,/g, '');
+      }
+      return null;
+    };
+
+    const reportPageAnchor = () => {
+      const slug = window.location.href.match(/\/event\/([^/?#]+)/)?.[1] || '';
+      const priceToBeat = parsePriceToBeat();
+      if (!slug || !priceToBeat) return;
+      sendMessage({
+        type: 'PAGE_ANCHOR_UPDATE',
+        payload: { slug, priceToBeat },
+      });
+    };
+
+    reportPageAnchor();
+    const interval = setInterval(reportPageAnchor, 2000);
+    return () => clearInterval(interval);
+  }, [pageHref, sendMessage]);
+
   return (
     <div style={{ pointerEvents: 'auto' }} className={`fixed bottom-4 right-4 bg-gray-900 text-white rounded-lg shadow-2xl overflow-hidden flex flex-col transition-all duration-300 max-w-[calc(100vw-2rem)] ${minimized ? 'w-[260px] h-[42px]' : expanded ? 'w-[420px] h-[min(750px,calc(100vh-2rem))]' : 'w-[360px] h-[min(580px,calc(100vh-2rem))]'}`}>
       {/* Header */}
