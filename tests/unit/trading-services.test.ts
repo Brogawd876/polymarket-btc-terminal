@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   OrderLifecycleService,
+  PresetEngine,
   QuoteService,
   RiskService,
   isAmbiguousSubmissionError,
@@ -81,6 +82,25 @@ describe('QuoteService executable quote binding', () => {
     const stale = staleService.create(quoteInput());
     expect(() => staleService.consume(stale.quoteId, makerIntent(stale.quoteId), { marketRevision: 8, bookVersion: 11 }))
       .toThrow(/stale/i);
+  });
+
+  it('prunes expired quotes while creating fresh quotes', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-11T12:00:00Z'));
+    const service = new QuoteService();
+    const expired = service.create(quoteInput({ ttlMs: 100 }));
+    vi.advanceTimersByTime(101);
+    service.create(quoteInput());
+    expect(() => service.consume(expired.quoteId, makerIntent(expired.quoteId), { marketRevision: 7, bookVersion: 11 }))
+      .toThrow(/not found|already used/i);
+  });
+});
+
+describe('PresetEngine', () => {
+  it('exposes the raw preset target so clamp and disable policies can be applied independently', () => {
+    const engine = new PresetEngine();
+    expect(engine.calculateRaw(0.99, 'CENT_OFFSET', 0.01)).toBe(1);
+    expect(engine.calculate(0.99, 'CENT_OFFSET', 0.01)).toBe(0.999);
   });
 });
 

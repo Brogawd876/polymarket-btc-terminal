@@ -53,4 +53,22 @@ describe('terminal reducer revisions', () => {
     expect(next.lastResponseId).toBe('order-request-7');
     expect(next.lastResponseType).toBe('ORDER_RESULT');
   });
+
+  it('does not mislabel routine quote unavailability as a rejected user command', () => {
+    const next = terminalReducer(initialTerminalState, {
+      type: 'SERVER_EVENT',
+      parsed: {
+        revision: null,
+        event: {
+          protocolVersion: 3,
+          type: 'ERROR',
+          id: 'quote-request-1',
+          payload: { code: 'QUOTE_UNAVAILABLE', message: 'Market book is switching' },
+        },
+      },
+    } as any);
+    expect(next.lastResponseId).toBe('quote-request-1');
+    expect(next.lastResult).toBe('No command result yet');
+    expect(next.lastError).toBe('Market book is switching');
+  });
 });

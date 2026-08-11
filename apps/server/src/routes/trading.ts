@@ -12,8 +12,12 @@ const number = (value: unknown) => Number.isFinite(Number(value)) ? Number(value
 const decimal = (value: number) => value.toFixed(8).replace(/\.?0+$/, '') || '0';
 
 export class PresetEngine {
+  calculateRaw(reference: number, mode: 'CENT_OFFSET' | 'PERCENT_OFFSET' | 'ABSOLUTE_PRICE', value: number): number {
+    return mode === 'CENT_OFFSET' ? reference + value : mode === 'PERCENT_OFFSET' ? reference * (1 + value / 100) : value;
+  }
+
   calculate(reference: number, mode: 'CENT_OFFSET' | 'PERCENT_OFFSET' | 'ABSOLUTE_PRICE', value: number): number {
-    const result = mode === 'CENT_OFFSET' ? reference + value : mode === 'PERCENT_OFFSET' ? reference * (1 + value / 100) : value;
+    const result = this.calculateRaw(reference, mode, value);
     return Math.max(0.001, Math.min(0.999, result));
   }
   round(price: number, tick: number, side: Side): number {
@@ -32,6 +36,11 @@ export class QuoteService {
     referenceType?: 'BEST_BID' | 'BEST_ASK' | 'MIDPOINT' | 'LAST_TRADE';
     makerBoundary?: number; marketRevision: number; bookVersion: number;
     requestedDollars?: number; requestedShares?: number; ttlMs?: number }): ExecutableQuote {
+    const now = Date.now();
+    for (const [id, quote] of this.quotes) {
+      if (quote.expiresAt < now) this.quotes.delete(id);
+    }
+
     let price = this.presets.round(v.referencePrice, v.tickSize, v.side);
     let clampResult: 'UNCHANGED' | 'CLAMPED' = 'UNCHANGED';
     if (v.executionMode === 'MAKER' && v.makerBoundary !== undefined) {
@@ -43,7 +52,6 @@ export class QuoteService {
     }
     if (!(price > 0 && price < 1)) throw new Error('Quote is outside the valid price range');
     const shares = v.requestedShares ?? ((v.requestedDollars || 0) / price);
-    const now = Date.now();
     const quote: ExecutableQuote = {
       quoteId: crypto.randomUUID(), conditionId: v.conditionId, tokenId: v.tokenId, outcome: v.outcome,
       side: v.side, executionMode: v.executionMode,

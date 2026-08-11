@@ -188,6 +188,9 @@ export function terminalReducer(state: TerminalState, action: TerminalAction): T
     case 'ORDER_RESULT':
       return { ...state, ...responseMeta, revision: nextRevision, lastError: payload.result === 'REJECTED' ? payload.errorMessage ?? 'Order rejected' : '', lastResult: `Order ${payload.result}` };
     case 'ERROR':
+      if (payload?.code === 'QUOTE_UNAVAILABLE') {
+        return { ...state, ...responseMeta, lastError: payload.message ?? event.error ?? 'Quotes are temporarily unavailable.' };
+      }
       return { ...state, ...responseMeta, lastError: payload?.message ?? event.error ?? 'Backend rejected the request.', lastResult: 'Command rejected' };
     case 'PROTOCOL_ERROR':
       return { ...state, lastError: payload.message };

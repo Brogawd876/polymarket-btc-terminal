@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useReducer } from 'react';
+import { useCallback, useEffect, useReducer, useRef } from 'react';
 import { createClientCommand, parseServerEvent } from '../protocol';
 import { initialTerminalState, terminalReducer } from '../terminalState';
 
 export function useWebSocket(_url: string) {
   const [state, dispatch] = useReducer(terminalReducer, initialTerminalState);
+  const contextAvailable = useRef(true);
 
   useEffect(() => {
     let port: chrome.runtime.Port;
@@ -32,18 +33,34 @@ export function useWebSocket(_url: string) {
         dispatch({ type: 'PROTOCOL_ERROR', message: 'Rejected unknown background message.' });
       }
     });
-    return () => port.disconnect();
+    return () => {
+      try { port.disconnect(); } catch {}
+    };
   }, []);
 
   const sendMessage = useCallback((input: unknown): string | null => {
+    if (!contextAvailable.current) return null;
     const parsed = createClientCommand(input);
     if (!parsed.success) {
       dispatch({ type: 'PROTOCOL_ERROR', message: parsed.error });
       return null;
     }
-    chrome.runtime.sendMessage({ type: 'SEND_WS', payload: parsed.data })?.catch(() => {
-      dispatch({ type: 'PROTOCOL_ERROR', message: 'Background service did not accept the command.' });
-    });
+    try {
+      chrome.runtime.sendMessage({ type: 'SEND_WS', payload: parsed.data })?.catch((error: unknown) => {
+        if (error instanceof Error && /extension context invalidated/i.test(error.message)) {
+          contextAvailable.current = false;
+          dispatch({ type: 'CONNECTION', connected: false });
+          dispatch({ type: 'PROTOCOL_ERROR', message: 'Extension was reloaded. Refresh this Polymarket page.' });
+          return;
+        }
+        dispatch({ type: 'PROTOCOL_ERROR', message: 'Background service did not accept the command.' });
+      });
+    } catch {
+      contextAvailable.current = false;
+      dispatch({ type: 'CONNECTION', connected: false });
+      dispatch({ type: 'PROTOCOL_ERROR', message: 'Extension was reloaded. Refresh this Polymarket page.' });
+      return null;
+    }
     return parsed.data.id;
   }, []);
 

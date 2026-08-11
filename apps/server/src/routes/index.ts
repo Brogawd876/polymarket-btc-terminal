@@ -328,8 +328,9 @@ export function evaluateReadiness(activeMarket: any): LiveReadiness {
   const downBid = parseFloat(activeMarket?.downBid || '0');
   const downAsk = parseFloat(activeMarket?.downAsk || '0');
   const booksCoherent = upBid > 0 && upAsk > 0 && upBid <= upAsk && downBid > 0 && downAsk > 0 && downBid <= downAsk;
+  const bookAgeMs = activeMarket?.lastUpdated ? Math.max(0, Date.now() - activeMarket.lastUpdated) : Number.MAX_SAFE_INTEGER;
   const marketDataFresh = publicMarketConnected && booksCoherent && !activeMarket?.stale
-    && (Date.now() - (activeMarket?.lastUpdated || 0) < loadConfig().MAX_MARKET_DATA_AGE_MS);
+    && bookAgeMs < loadConfig().MAX_MARKET_DATA_AGE_MS;
   const referenceDataFresh = !rtds.stale;
   
   const minTimeRemainingMs = Number(process.env.MIN_TIME_REMAINING_MS || 10000);
@@ -367,7 +368,7 @@ export function evaluateReadiness(activeMarket: any): LiveReadiness {
   if (liveArmedState && healthBlockers.length > 0) disarmLive('READINESS_LOST');
   checks.push(
     { code: 'BOOKS_COHERENT', subsystem: 'MARKET', ready: booksCoherent, message: booksCoherent ? 'Both books coherent' : 'Outcome books invalid' },
-    { code: 'BOOK_AGE_MS', subsystem: 'MARKET', ready: marketDataFresh, message: 'Market book freshness', measuredValue: Date.now() - (activeMarket?.lastUpdated || 0), limitValue: loadConfig().MAX_MARKET_DATA_AGE_MS },
+    { code: 'BOOK_AGE_MS', subsystem: 'MARKET', ready: marketDataFresh, message: 'Market book freshness', measuredValue: bookAgeMs, limitValue: loadConfig().MAX_MARKET_DATA_AGE_MS },
     { code: 'REFERENCE_AGE_MS', subsystem: 'REFERENCE', ready: referenceDataFresh, message: 'Reference freshness', measuredValue: rtds.dataAgeMs, limitValue: loadConfig().MAX_REFERENCE_DATA_AGE_MS },
     { code: 'ANCHOR_VALID', subsystem: 'REFERENCE', ready: anchorValid, message: 'Opening anchor validation', measuredValue: anchor?.validationMethod || 'MISSING' },
     { code: 'USER_STREAM', subsystem: 'ACCOUNT', ready: userStreamConnected, message: 'Authenticated private stream' },
@@ -578,8 +579,12 @@ export async function registerRoutes(app: FastifyInstance) {
     }, 1000);
 
     connection.socket.on('message', async (message: any) => {
+      let requestId: string | undefined;
+      let requestType: string | undefined;
       try {
         const rawPayload = JSON.parse(message.toString());
+        requestId = typeof rawPayload?.id === 'string' ? rawPayload.id : undefined;
+        requestType = typeof rawPayload?.type === 'string' ? rawPayload.type : undefined;
         const parsedCommand = ClientCommandEnvelopeSchema.safeParse(rawPayload);
         const detailedCommand = WsEventSchema.safeParse(rawPayload);
         if (!parsedCommand.success || !detailedCommand.success) {
@@ -733,15 +738,26 @@ export async function registerRoutes(app: FastifyInstance) {
           const presets = (db.prepare('SELECT * FROM presets').all() as any[])
             .map(row => { try { return { id: row.id, name: row.name, ...JSON.parse(row.config) }; } catch { return null; } })
             .filter(Boolean).filter((preset: any) => preset.active !== false);
-          const makerQuotes = presets.map((preset: any) => {
+          const makerQuotes = presets.flatMap((preset: any) => {
             const side = preset.side as 'BUY' | 'SELL';
             const referenceType = preset.reference || (side === 'BUY' ? 'BEST_ASK' : 'BEST_BID');
             const reference = referenceType === 'BEST_BID' ? bid : referenceType === 'BEST_ASK' ? ask : (bid + ask) / 2;
-            const target = presetEngine.calculate(reference, preset.mode, Number(preset.value || 0));
-            return { ...executionService!.quotes.create({ conditionId: market.conditionId, tokenId, outcome, side, executionMode: 'MAKER',
-              referenceType, referencePrice: target, makerBoundary: side === 'BUY' ? ask : bid, tickSize: tick,
-              marketRevision: revision, bookVersion, requestedDollars: Number(payload.payload?.requestedDollars || 0),
-              requestedShares: Number(payload.payload?.requestedShares || 0) }), presetId: preset.id };
+            const rawTarget = presetEngine.calculateRaw(reference, preset.mode, Number(preset.value || 0));
+            const target = Math.max(tick, Math.min(1 - tick, rawTarget));
+            const roundedTarget = presetEngine.round(target, tick, side);
+            const makerBoundary = side === 'BUY' ? ask : bid;
+            const wouldClamp = rawTarget !== target || (side === 'BUY' ? roundedTarget >= makerBoundary : roundedTarget <= makerBoundary);
+            if (preset.clampMode === 'DISABLE' && wouldClamp) return [];
+
+            try {
+              return [{ ...executionService!.quotes.create({ conditionId: market.conditionId, tokenId, outcome, side, executionMode: 'MAKER',
+                referenceType, referencePrice: target, makerBoundary, tickSize: tick,
+                marketRevision: revision, bookVersion, requestedDollars: Number(payload.payload?.requestedDollars || 0),
+                requestedShares: Number(payload.payload?.requestedShares || 0) }), presetId: preset.id }];
+            } catch (error) {
+              if (error instanceof Error && error.message === 'Quote is outside the valid price range') return [];
+              throw error;
+            }
           });
           const quotes = [...makerQuotes,
             executionService!.quotes.create({ conditionId: market.conditionId, tokenId, outcome, side: 'BUY', executionMode: 'IMMEDIATE',
@@ -1077,7 +1093,16 @@ export async function registerRoutes(app: FastifyInstance) {
           }
         }
       } catch (err: any) {
-        connection.socket.send(JSON.stringify({ type: 'ERROR', protocolVersion: PROTOCOL_VERSION, error: err.message }));
+        connection.socket.send(JSON.stringify({
+          type: 'ERROR',
+          protocolVersion: PROTOCOL_VERSION,
+          id: requestId,
+          payload: {
+            code: requestType === 'REQUEST_QUOTES' ? 'QUOTE_UNAVAILABLE' : 'COMMAND_REJECTED',
+            message: err.message,
+          },
+          error: err.message,
+        }));
       }
     });
 
