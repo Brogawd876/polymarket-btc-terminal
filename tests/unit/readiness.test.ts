@@ -1,7 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { evaluateReadiness, determineOperationalState } from '../../apps/server/src/routes/index';
+import { resetConfigForTests } from '../../apps/server/src/config';
 
 describe('LiveReadiness & Operational State Engine', () => {
+  beforeAll(() => { process.env.WS_AUTH_TOKEN = 'test-token-that-is-at-least-24-chars'; resetConfigForTests(); });
   it('blocks live execution when disarmed', () => {
     const market = {
       conditionId: '0x123',

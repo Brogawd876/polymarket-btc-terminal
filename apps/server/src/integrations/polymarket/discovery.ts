@@ -55,9 +55,7 @@ export class DiscoveryService {
 
   getCurrentMarket(): MarketState | null {
     const markets = this.withCurrentTypes(this.latestMarkets);
-    return markets.find(m => m.type === 'CURRENT')
-      || markets.find(m => m.type === 'NEXT')
-      || null;
+    return markets.find(m => m.type === 'CURRENT') || null;
   }
 
   getNextMarket(): MarketState | null {
@@ -223,10 +221,8 @@ export class DiscoveryService {
           }
         }
 
-        if (!upTokenId || !downTokenId) {
-          upTokenId = clobTokens[0];
-          downTokenId = clobTokens[1];
-        }
+        // Token array position is not an outcome contract. If Gamma does not
+        // provide an explicit outcome mapping, the market is not tradeable.
       }
     }
 

@@ -3,21 +3,17 @@ import { adapter, getLocalAuthToken } from '../index';
 import { getDb } from '../db/index';
 import { z } from 'zod';
 import { SocketStream } from '@fastify/websocket';
-import { getRtdsMetrics, isRtdsStale, setActiveMarketAnchor, setPageMarketAnchor, getMarketAnchor } from '../integrations/polymarket/rtds';
-import { LiveReadiness, OperationalState } from '@polymarket-btc/shared';
-
-const PlaceOrderSchema = z.object({
-  tokenId: z.string().min(1),
-  outcome: z.enum(['UP', 'DOWN']).optional(),
-  side: z.enum(['BUY', 'SELL']),
-  dollarSpend: z.string().optional(),
-  price: z.string().regex(/^0\.(\d+)$/).refine(v => parseFloat(v) > 0 && parseFloat(v) < 1),
-  size: z.string().refine(v => parseFloat(v) > 0 && parseFloat(v) <= 100000),
-  presetId: z.string().optional(),
-  executionMode: z.enum(['MAKER', 'ONE_TAP']).optional().default('MAKER'),
-  orderType: z.enum(['GTC', 'FAK']).optional().default('GTC'),
-  slippageBps: z.number().min(0).max(1000).optional().default(100)
-});
+import { getRtdsMetrics, setActiveMarketAnchor, getMarketAnchor } from '../integrations/polymarket/rtds';
+import {
+  ClientCommandEnvelopeSchema,
+  LiveReadiness,
+  OperationalState,
+  OrderIntentSchema,
+  PROTOCOL_VERSION,
+  WsEventSchema,
+} from '@polymarket-btc/shared';
+import { getAllowedExtensionOrigin, loadConfig } from '../config';
+import { ExecutionService, PresetEngine } from './trading';
 
 const CancelOrderSchema = z.object({
   orderId: z.string().min(1)
@@ -41,14 +37,28 @@ const PageAnchorSchema = z.object({
 
 let liveArmedState = false;
 let armTimeout: NodeJS.Timeout | null = null;
+let snapshotRevision = 0;
+let executionService: ExecutionService | null = null;
+let lastAccountState: any = null;
+let lastAccountStateAt = 0;
+let activeTradingSessionId: string | null = null;
 const PANEL_ORDER_RECENCY_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_ORDER_STATUS_SQL = "'PENDING','OPEN','NEW','LIVE','SUBMITTING','ACCEPTED','PARTIALLY_FILLED','CANCEL_PENDING','RECONCILING'";
 const POSITION_EPSILON = 0.000001;
 
+async function refreshAccountState(): Promise<void> {
+  if (!adapter?.getIsConnected()) return;
+  const account = await adapter.getAccountState();
+  lastAccountState = account;
+  lastAccountStateAt = Date.now();
+}
+
 function normalizeOrderRow(row: any): any {
   if (!row) return row;
+  const normalized = Object.fromEntries(Object.entries(row).filter(([, value]) => value !== null));
   return {
-    ...row,
+    ...normalized,
+    reconciliationRequired: Boolean(row.reconciliationRequired),
     timestamp: row.createdAt || row.updatedAt || Date.now(),
   };
 }
@@ -140,6 +150,64 @@ function subscribeAdapterToMarket(market: any) {
   }
 }
 
+let authoritativeMarketState: any = null;
+let authoritativeMarketConditionId: string | null = null;
+let authoritativeMarketRefreshedAt = 0;
+let authoritativeMarketRefresh: Promise<any> | null = null;
+
+async function getAuthoritativeMarket(force = false): Promise<any> {
+  if (authoritativeMarketRefresh) return authoritativeMarketRefresh;
+  if (!force && authoritativeMarketState && Date.now() - authoritativeMarketRefreshedAt < 200) {
+    return authoritativeMarketState;
+  }
+
+  authoritativeMarketRefresh = (async () => {
+    const discovery = (globalThis as any).discoveryService;
+    const discovered = discovery?.getCurrentMarket?.() || null;
+    if (!discovered?.conditionId || !adapter) {
+      authoritativeMarketState = null;
+      authoritativeMarketConditionId = null;
+      authoritativeMarketRefreshedAt = Date.now();
+      return null;
+    }
+
+    const changed = authoritativeMarketConditionId !== discovered.conditionId;
+    if (changed) {
+      disarmLive('MARKET_ROLLOVER');
+      subscribeAdapterToMarket(discovered);
+      setActiveMarketAnchor(discovered.conditionId, discovered.startTime || 0);
+    }
+
+    const bookState = await adapter.getMarketState(discovered.conditionId);
+    const merged = { ...discovered, ...(bookState || {}) };
+    const anchor = getMarketAnchor(merged.conditionId);
+    const timeRemaining = merged.targetTime ? merged.targetTime - Date.now() : 0;
+    merged.transitionPhase = timeRemaining <= loadConfig().MIN_TIME_REMAINING_MS
+      ? 'CUTOFF'
+      : (!merged.upBook || !merged.downBook || merged.stale)
+        ? 'WAITING_FOR_BOOKS'
+        : (!anchor?.validated ? 'VALIDATING_ANCHOR' : 'STEADY');
+    if (merged.transitionPhase !== 'STEADY') disarmLive(`MARKET_${merged.transitionPhase}`);
+
+    if (changed) {
+      try {
+        getDb().prepare(`INSERT INTO audit_events (category,action,payload,timestamp) VALUES ('MARKET','ROLLOVER',?,?)`)
+          .run(JSON.stringify({ from: authoritativeMarketConditionId, to: merged.conditionId, phase: merged.transitionPhase }), Date.now());
+      } catch {}
+    }
+    authoritativeMarketConditionId = merged.conditionId;
+    authoritativeMarketState = merged;
+    authoritativeMarketRefreshedAt = Date.now();
+    return merged;
+  })();
+
+  try {
+    return await authoritativeMarketRefresh;
+  } finally {
+    authoritativeMarketRefresh = null;
+  }
+}
+
 async function getAvailableShares(db: any, tokenId: string): Promise<number> {
   const position = db.prepare(`SELECT netSize FROM positions WHERE tokenId = ?`).get(tokenId) as { netSize?: string } | undefined;
   const localShares = parseFloat(position?.netSize || '0');
@@ -153,7 +221,10 @@ async function getAvailableShares(db: any, tokenId: string): Promise<number> {
 }
 
 async function getPanelPositions(db: any, market?: any): Promise<any[]> {
-  const rows = db.prepare(`SELECT * FROM positions WHERE CAST(netSize AS REAL) > 0`).all() as any[];
+  const rows = (db.prepare(`SELECT * FROM positions WHERE CAST(netSize AS REAL) > 0`).all() as any[]).map(row => ({
+    ...Object.fromEntries(Object.entries(row).filter(([, value]) => value !== null)),
+    feesKnown: Boolean(row.feesKnown),
+  })) as any[];
   const byToken = new Map<string, any>(rows.map(position => [position.tokenId, position]));
   const marketTokens = [
     { tokenId: market?.upTokenId || market?.yesTokenId, outcome: 'UP' },
@@ -168,6 +239,9 @@ async function getPanelPositions(db: any, market?: any): Promise<any[]> {
     }
 
     const existing = byToken.get(marketToken.tokenId);
+    const reservedShares = Number((db.prepare(`SELECT COALESCE(SUM(CAST(amount AS REAL)),0) amount FROM reservations
+      WHERE assetType='SHARES' AND assetId=? AND state IN ('RESERVED','SUBMITTING','ACTIVE','RECONCILING')`)
+      .get(marketToken.tokenId) as any)?.amount || 0);
     byToken.set(marketToken.tokenId, {
       ...(existing || {}),
       tokenId: marketToken.tokenId,
@@ -175,7 +249,8 @@ async function getPanelPositions(db: any, market?: any): Promise<any[]> {
       outcome: existing?.outcome || marketToken.outcome,
       netSize: String(remoteShares),
       netShares: String(remoteShares),
-      availableShares: String(remoteShares),
+      reservedShares: String(reservedShares),
+      availableShares: String(Math.max(0, remoteShares - reservedShares)),
       avgPrice: existing?.avgPrice || '0',
       fees: existing?.fees || '0',
       unrealizedPnl: existing?.unrealizedPnl || 0,
@@ -189,20 +264,48 @@ async function getPanelPositions(db: any, market?: any): Promise<any[]> {
 
 function armLive(durationMs: number = 300000) {
   liveArmedState = true;
+  try {
+    const db = getDb();
+    activeTradingSessionId = crypto.randomUUID();
+    db.prepare(`INSERT INTO trading_sessions (id,startedAt,startingBalance) VALUES (?,?,?)`)
+      .run(activeTradingSessionId, Date.now(), String(lastAccountState?.collateralBalance ?? ''));
+    db.prepare(`INSERT INTO audit_events (category,action,payload,timestamp) VALUES ('EXECUTION','ARM',?,?)`)
+      .run(JSON.stringify({ durationMs, sessionId: activeTradingSessionId }), Date.now());
+  } catch {}
   if (armTimeout) clearTimeout(armTimeout);
   armTimeout = setTimeout(() => {
     disarmLive();
   }, durationMs);
 }
 
-function disarmLive() {
+export function disarmLive(_reason: string = 'OPERATOR') {
   liveArmedState = false;
   if (armTimeout) clearTimeout(armTimeout);
   armTimeout = null;
+  try {
+    const db = getDb();
+    if (activeTradingSessionId) {
+      db.prepare('UPDATE trading_sessions SET endedAt=?,endingBalance=? WHERE id=? AND endedAt IS NULL')
+        .run(Date.now(), String(lastAccountState?.collateralBalance ?? ''), activeTradingSessionId);
+      activeTradingSessionId = null;
+    }
+    db.prepare(`INSERT INTO audit_events (category,action,payload,timestamp) VALUES ('EXECUTION','DISARM',?,?)`)
+      .run(JSON.stringify({ reason: _reason }), Date.now());
+  } catch {}
+}
+
+function authenticatedHttp(request: any, reply: any, done: () => void) {
+  const bearer = String(request.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (request.headers.origin !== getAllowedExtensionOrigin() || bearer !== getLocalAuthToken()) {
+    reply.code(401).send({ error: 'Authenticated extension access required' });
+    return;
+  }
+  done();
 }
 
 export function evaluateReadiness(activeMarket: any): LiveReadiness {
   const blockingReasons: string[] = [];
+  const checks: any[] = [];
   const rtds = getRtdsMetrics();
   const enableLive = process.env.ENABLE_LIVE_TRADING === 'true';
 
@@ -216,10 +319,16 @@ export function evaluateReadiness(activeMarket: any): LiveReadiness {
   const accountConfigured = enableLive && !!process.env.PRIVATE_KEY;
   const accountAuthenticated = adapter ? adapter.getIsConnected() : false;
   const userStreamConnected = adapter ? adapter.getUserStreamConnected() : false;
-  const balanceLoaded = accountAuthenticated;
-  const allowanceValid = true;
+  const balanceLoaded = !!lastAccountState && lastAccountState.balanceStale !== true && Date.now() - lastAccountStateAt < 10000;
+  const allowanceValid = balanceLoaded && lastAccountState.allowanceValid === true;
   const reconciliationComplete = adapter ? adapter.getLastReconciliationTime() > 0 : false;
-  const marketDataFresh = publicMarketConnected && (Date.now() - (activeMarket?.lastUpdated || 0) < 10000);
+  const upBid = parseFloat(activeMarket?.upBid || '0');
+  const upAsk = parseFloat(activeMarket?.upAsk || '0');
+  const downBid = parseFloat(activeMarket?.downBid || '0');
+  const downAsk = parseFloat(activeMarket?.downAsk || '0');
+  const booksCoherent = upBid > 0 && upAsk > 0 && upBid <= upAsk && downBid > 0 && downAsk > 0 && downBid <= downAsk;
+  const marketDataFresh = publicMarketConnected && booksCoherent && !activeMarket?.stale
+    && (Date.now() - (activeMarket?.lastUpdated || 0) < loadConfig().MAX_MARKET_DATA_AGE_MS);
   const referenceDataFresh = !rtds.stale;
   
   const minTimeRemainingMs = Number(process.env.MIN_TIME_REMAINING_MS || 10000);
@@ -233,15 +342,37 @@ export function evaluateReadiness(activeMarket: any): LiveReadiness {
   if (!accountConfigured) blockingReasons.push('READ ONLY: LIVE CREDENTIALS NOT CONFIGURED');
   if (!accountAuthenticated) blockingReasons.push('READ ONLY: CLOB AUTHENTICATION INCOMPLETE');
   if (!userStreamConnected) blockingReasons.push('READ ONLY: USER ORDER STREAM DISCONNECTED');
+  if (!balanceLoaded) blockingReasons.push('READ ONLY: ACCOUNT BALANCE IS NOT FRESH');
+  if (!allowanceValid) blockingReasons.push('READ ONLY: COLLATERAL ALLOWANCE IS NOT CONFIRMED');
   if (!referenceDataFresh) blockingReasons.push(`BLOCKED: REFERENCE DATA IS STALE (${(rtds.dataAgeMs / 1000).toFixed(1)}s OLD)`);
-  if (!marketDataFresh) blockingReasons.push('BLOCKED: MARKET DATA IS STALE');
+  if (!marketDataFresh) blockingReasons.push(booksCoherent ? 'BLOCKED: MARKET DATA IS STALE' : 'BLOCKED: BOTH OUTCOME BOOKS MUST BE COHERENT');
   if (!minimumTimeRemainingSatisfied) blockingReasons.push(`BLOCKED: LESS THAN ${Math.round(minTimeRemainingMs / 1000)} SECONDS REMAINING`);
 
   const anchor = activeMarket ? getMarketAnchor(activeMarket.conditionId) : undefined;
-  if (!anchor || !anchor.validated) blockingReasons.push('BLOCKED: OPENING PRICE ANCHOR NOT VALIDATED');
+  const anchorValid = !!anchor && anchor.validated && parseFloat(anchor.value) > 0
+    && anchor.windowStart === activeMarket?.startTime
+    && anchor.validationMethod !== 'CURRENT_SPOT';
+  if (!anchorValid) blockingReasons.push('BLOCKED: OPENING PRICE ANCHOR NOT VALIDATED FOR THIS WINDOW');
+
+  const unresolved = (() => {
+    try { return Number((getDb().prepare("SELECT COUNT(*) count FROM orders WHERE reconciliationRequired=1 OR status IN ('UNKNOWN','RECONCILING')").get() as any)?.count || 0); }
+    catch { return 1; }
+  })();
+  if (unresolved > 0) blockingReasons.push(`BLOCKED: ${unresolved} ORDER(S) REQUIRE RECONCILIATION`);
 
   if (!liveArmedState) blockingReasons.push('LIVE EXECUTION DISARMED');
 
+  const healthBlockers = blockingReasons.filter(reason => reason !== 'LIVE EXECUTION DISARMED');
+  if (liveArmedState && healthBlockers.length > 0) disarmLive('READINESS_LOST');
+  checks.push(
+    { code: 'BOOKS_COHERENT', subsystem: 'MARKET', ready: booksCoherent, message: booksCoherent ? 'Both books coherent' : 'Outcome books invalid' },
+    { code: 'BOOK_AGE_MS', subsystem: 'MARKET', ready: marketDataFresh, message: 'Market book freshness', measuredValue: Date.now() - (activeMarket?.lastUpdated || 0), limitValue: loadConfig().MAX_MARKET_DATA_AGE_MS },
+    { code: 'REFERENCE_AGE_MS', subsystem: 'REFERENCE', ready: referenceDataFresh, message: 'Reference freshness', measuredValue: rtds.dataAgeMs, limitValue: loadConfig().MAX_REFERENCE_DATA_AGE_MS },
+    { code: 'ANCHOR_VALID', subsystem: 'REFERENCE', ready: anchorValid, message: 'Opening anchor validation', measuredValue: anchor?.validationMethod || 'MISSING' },
+    { code: 'USER_STREAM', subsystem: 'ACCOUNT', ready: userStreamConnected, message: 'Authenticated private stream' },
+    { code: 'RECONCILIATION', subsystem: 'RECOVERY', ready: reconciliationComplete && unresolved === 0, message: 'Remote/local reconciliation', measuredValue: unresolved, limitValue: 0 },
+    { code: 'CUTOFF_MS', subsystem: 'RISK', ready: minimumTimeRemainingSatisfied, message: 'Time remaining', measuredValue: timeLeft, limitValue: minTimeRemainingMs },
+  );
   return {
     backendConnected,
     publicMarketConnected,
@@ -259,6 +390,9 @@ export function evaluateReadiness(activeMarket: any): LiveReadiness {
     minimumTimeRemainingSatisfied,
     liveEnabledByConfiguration: enableLive,
     liveArmed: liveArmedState,
+    executionPermitted: liveArmedState && healthBlockers.length === 0,
+    checks,
+    revision: snapshotRevision,
     blockingReasons,
   };
 }
@@ -274,32 +408,37 @@ export function determineOperationalState(readiness: LiveReadiness, activeMarket
 }
 
 export async function registerRoutes(app: FastifyInstance) {
+  const db = getDb();
+  executionService = new ExecutionService(db, adapter, disarmLive);
+  (globalThis as any).disarmLive = disarmLive;
   app.get('/api/v1/health', async () => {
     return { status: 'ok', timestamp: Date.now() };
   });
 
-  app.get('/api/v1/token', async () => {
+  app.get('/api/v1/token', async (request, reply) => {
+    if (request.headers.origin !== getAllowedExtensionOrigin()) {
+      return reply.code(403).send({ error: 'Pairing is only available to the configured extension' });
+    }
     return { token: getLocalAuthToken() };
   });
 
   app.get('/api/v1/readiness', async () => {
-    const globalDiscoveryService = (globalThis as any).discoveryService;
-    const currentMarket = globalDiscoveryService ? globalDiscoveryService.getCurrentMarket() : null;
+    const currentMarket = await getAuthoritativeMarket(true);
+    try { await refreshAccountState(); } catch {}
     const readiness = evaluateReadiness(currentMarket);
     const state = determineOperationalState(readiness, currentMarket);
     return { operationalState: state, readiness };
   });
 
   app.post('/api/v1/live/disarm', async () => {
-    const globalDiscoveryService = (globalThis as any).discoveryService;
-    const currentMarket = globalDiscoveryService ? globalDiscoveryService.getCurrentMarket() : null;
+    const currentMarket = await getAuthoritativeMarket();
     disarmLive();
     const readiness = evaluateReadiness(currentMarket);
     const state = determineOperationalState(readiness, currentMarket);
     return { success: true, operationalState: state, readiness };
   });
 
-  app.get('/api/v1/presets', async () => {
+  app.get('/api/v1/presets', { preHandler: authenticatedHttp }, async () => {
     const db = getDb();
     const rows = db.prepare('SELECT * FROM presets').all() as any[];
     if (rows.length === 0) {
@@ -324,7 +463,7 @@ export async function registerRoutes(app: FastifyInstance) {
     return rows.map(r => ({ id: r.id, name: r.name, ...JSON.parse(r.config) }));
   });
 
-  app.post('/api/v1/presets', async (request) => {
+  app.post('/api/v1/presets', { preHandler: authenticatedHttp }, async (request) => {
     const db = getDb();
     const crypto = require('crypto');
     const body = request.body as any;
@@ -334,7 +473,7 @@ export async function registerRoutes(app: FastifyInstance) {
     return { success: true, preset: { id, ...body } };
   });
 
-  app.get('/api/settings', async () => {
+  app.get('/api/settings', { preHandler: authenticatedHttp }, async () => {
     const db = getDb();
     const rows = db.prepare('SELECT * FROM settings').all() as { key: string, value: string }[];
     const map: Record<string, string> = {
@@ -347,7 +486,7 @@ export async function registerRoutes(app: FastifyInstance) {
     return map;
   });
 
-  app.post('/api/settings', async (request) => {
+  app.post('/api/settings', { preHandler: authenticatedHttp }, async (request) => {
     const db = getDb();
     const body = request.body as Record<string, any>;
     const insert = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
@@ -357,98 +496,155 @@ export async function registerRoutes(app: FastifyInstance) {
     return { success: true };
   });
 
-  app.get('/api/positions', async () => {
+  app.get('/api/positions', { preHandler: authenticatedHttp }, async () => {
     const db = getDb();
     const globalDiscoveryService = (globalThis as any).discoveryService;
     const currentMarket = globalDiscoveryService ? globalDiscoveryService.getCurrentMarket() : null;
     return getPanelPositions(db, currentMarket);
   });
 
-  app.get('/api/balance', async () => {
+  app.get('/api/balance', { preHandler: authenticatedHttp }, async () => {
     const balance = adapter ? await adapter.getBalance() : 0;
     return { balance };
   });
 
   app.get('/ws', { websocket: true }, (connection: SocketStream, req: any) => {
+    if (req.headers?.origin !== getAllowedExtensionOrigin()) {
+      connection.socket.close(1008, 'Configured extension origin required');
+      return;
+    }
     let activeMarketId: string | null = null;
     let isAuthenticated = false;
+    let helloAccepted = false;
+    const sessionId = crypto.randomUUID();
+    (connection.socket as any).sessionId = sessionId;
 
     const authTimeout = setTimeout(() => {
       if (!isAuthenticated) connection.socket.close();
     }, 3000);
     
     const intervalId = setInterval(async () => {
+      if (!isAuthenticated) return;
       try {
         const db = getDb();
         const globalDiscoveryService = (globalThis as any).discoveryService;
-        const currentMarket = globalDiscoveryService ? globalDiscoveryService.getCurrentMarket() : null;
+        const currentMarket = await getAuthoritativeMarket(true);
         const markets = globalDiscoveryService ? globalDiscoveryService.getMarkets() : [];
         if (!activeMarketId && currentMarket?.conditionId) {
           activeMarketId = currentMarket.conditionId;
           subscribeAdapterToMarket(currentMarket);
         }
-        const selectedMarket = markets.find((market: any) => market.conditionId === activeMarketId);
-        if (activeMarketId && (!selectedMarket || (selectedMarket.targetTime && selectedMarket.targetTime <= Date.now()))) {
-          activeMarketId = currentMarket?.conditionId || null;
-          subscribeAdapterToMarket(currentMarket);
-        }
+        if (activeMarketId !== currentMarket?.conditionId) activeMarketId = currentMarket?.conditionId || null;
 
-        const state = activeMarketId && adapter ? await adapter.getMarketState(activeMarketId) : null;
-        if (state) {
-          const activeMarket = markets.find((market: any) => market.conditionId === activeMarketId) || currentMarket;
+        if (currentMarket) {
+          const activeMarket = currentMarket;
+          const state = currentMarket;
+          const timeRemaining = activeMarket.targetTime ? activeMarket.targetTime - Date.now() : 0;
+          const anchor = getMarketAnchor(activeMarket.conditionId);
+          activeMarket.transitionPhase = timeRemaining <= loadConfig().MIN_TIME_REMAINING_MS
+            ? 'CUTOFF'
+            : (!activeMarket.upBook || !activeMarket.downBook || activeMarket.stale)
+              ? 'WAITING_FOR_BOOKS'
+              : (!anchor?.validated ? 'VALIDATING_ANCHOR' : 'STEADY');
+          if (activeMarket.transitionPhase !== 'STEADY') disarmLive(`MARKET_${activeMarket.transitionPhase}`);
           const readiness = evaluateReadiness(activeMarket);
           const operationalState = determineOperationalState(readiness, activeMarket);
           const positions = await getPanelPositions(db, activeMarket);
           const orders = getPanelOrders(db);
           const balance = adapter ? await adapter.getBalance() : 0;
+          const account = adapter ? await adapter.getAccountState() : undefined;
+          if (account) { lastAccountState = account; lastAccountStateAt = Date.now(); }
           const updateMarkets = markets.map((market: any) => market.conditionId === state.conditionId ? state : market);
           connection.socket.send(JSON.stringify({
-            type: 'MARKET_UPDATE',
+            type: 'TERMINAL_SNAPSHOT',
+            protocolVersion: PROTOCOL_VERSION,
             payload: {
-              ...state,
+              protocolVersion: PROTOCOL_VERSION,
+              revision: ++snapshotRevision,
+              publishedAt: Date.now(),
+              market: activeMarket,
+              anchor,
               readiness,
               operationalState,
+              reference: getRtdsMetrics(),
               positions,
               orders,
               balance,
+              account,
               markets: updateMarkets,
             }
           }));
+          db.prepare('UPDATE outbox_events SET publishedAt=? WHERE publishedAt IS NULL').run(Date.now());
         }
       } catch (err) {
-        // Ignore
+        disarmLive('SNAPSHOT_FAILURE');
+        app.log.error(err, 'Failed to publish terminal snapshot');
       }
     }, 1000);
 
     connection.socket.on('message', async (message: any) => {
       try {
-        const payload = JSON.parse(message.toString());
+        const rawPayload = JSON.parse(message.toString());
+        const parsedCommand = ClientCommandEnvelopeSchema.safeParse(rawPayload);
+        const detailedCommand = WsEventSchema.safeParse(rawPayload);
+        if (!parsedCommand.success || !detailedCommand.success) {
+          connection.socket.send(JSON.stringify({ type: 'PROTOCOL_ERROR', protocolVersion: PROTOCOL_VERSION,
+            id: rawPayload?.id, payload: { code: 'INVALID_MESSAGE', message: 'Invalid or incompatible command' } }));
+          return;
+        }
+        const payload = detailedCommand.data as any;
         const db = getDb();
         const globalDiscoveryService = (globalThis as any).discoveryService;
-        const currentMarket = globalDiscoveryService ? globalDiscoveryService.getCurrentMarket() : null;
+        const currentMarket = await getAuthoritativeMarket(true);
         
+        if (payload.type === 'HELLO') {
+          helloAccepted = true;
+          connection.socket.send(JSON.stringify({ type: 'HELLO_ACK', protocolVersion: PROTOCOL_VERSION, id: payload.id,
+            payload: { protocolVersion: PROTOCOL_VERSION, serverVersion: '2.0.0', sessionId } }));
+          return;
+        }
+
         if (payload.type === 'AUTH') {
+          if (!helloAccepted) {
+            connection.socket.send(JSON.stringify({ type: 'PROTOCOL_ERROR', protocolVersion: PROTOCOL_VERSION, id: payload.id,
+              payload: { code: 'HELLO_REQUIRED', message: 'Protocol handshake is required before authentication' } }));
+            connection.socket.close(1008, 'HELLO required');
+            return;
+          }
           const expectedToken = getLocalAuthToken();
           if (payload.payload && payload.payload.token === expectedToken) {
             isAuthenticated = true;
+            (connection.socket as any).terminalAuthenticated = true;
+            getDb().prepare(`INSERT INTO extension_sessions (id,origin,protocolVersion,authenticatedAt,lastSeenAt)
+              VALUES (?,?,?,?,?)`).run(sessionId, req.headers.origin, PROTOCOL_VERSION, Date.now(), Date.now());
+            getDb().prepare(`INSERT INTO connection_events (subsystem,state,reason,timestamp) VALUES ('EXTENSION','AUTHENTICATED',?,?)`)
+              .run(req.headers.origin, Date.now());
             clearTimeout(authTimeout);
-            connection.socket.send(JSON.stringify({ type: 'AUTH_OK', id: payload.id }));
+            connection.socket.send(JSON.stringify({ type: 'AUTH_OK', protocolVersion: PROTOCOL_VERSION, id: payload.id }));
           } else {
-            connection.socket.send(JSON.stringify({ type: 'AUTH_ERROR', payload: { message: 'Invalid local auth token' }, id: payload.id }));
+            connection.socket.send(JSON.stringify({ type: 'AUTH_ERROR', protocolVersion: PROTOCOL_VERSION, payload: { message: 'Invalid local auth token' }, id: payload.id }));
             connection.socket.close();
           }
           return;
         }
 
+        if (!isAuthenticated) {
+          connection.socket.send(JSON.stringify({ type: 'PROTOCOL_ERROR', protocolVersion: PROTOCOL_VERSION,
+            id: payload.id, payload: { code: 'AUTH_REQUIRED', message: 'Authenticate before sending commands' } }));
+          return;
+        }
+        getDb().prepare('UPDATE extension_sessions SET lastSeenAt=? WHERE id=?').run(Date.now(), sessionId);
+
         if (payload.type === 'ARM_LIVE') {
           if (!isAuthenticated) return;
           const duration = payload.payload?.durationSeconds ? payload.payload.durationSeconds * 1000 : 300000;
+          try { await refreshAccountState(); } catch {}
           const readinessBeforeArm = evaluateReadiness(currentMarket);
           const blockersBeforeArm = readinessBeforeArm.blockingReasons.filter(reason => reason !== 'LIVE EXECUTION DISARMED');
           if (blockersBeforeArm.length > 0) {
-            connection.socket.send(JSON.stringify({ type: 'READINESS_UPDATED', id: payload.id, payload: readinessBeforeArm }));
+            connection.socket.send(JSON.stringify({ type: 'READINESS_UPDATED', protocolVersion: PROTOCOL_VERSION, id: payload.id, payload: { ...readinessBeforeArm, revision: ++snapshotRevision } }));
             connection.socket.send(JSON.stringify({
-              type: 'ERROR',
+              type: 'ERROR', protocolVersion: PROTOCOL_VERSION,
               id: payload.id,
               payload: { message: `Cannot arm live trading: ${blockersBeforeArm.join('; ')}` },
               error: `Cannot arm live trading: ${blockersBeforeArm.join('; ')}`
@@ -457,7 +653,7 @@ export async function registerRoutes(app: FastifyInstance) {
           }
           armLive(duration);
           const readiness = evaluateReadiness(currentMarket);
-          connection.socket.send(JSON.stringify({ type: 'READINESS_UPDATED', id: payload.id, payload: readiness }));
+          connection.socket.send(JSON.stringify({ type: 'READINESS_UPDATED', protocolVersion: PROTOCOL_VERSION, id: payload.id, payload: { ...readiness, revision: ++snapshotRevision } }));
           return;
         }
 
@@ -465,20 +661,17 @@ export async function registerRoutes(app: FastifyInstance) {
           if (!isAuthenticated) return;
           disarmLive();
           const readiness = evaluateReadiness(currentMarket);
-          connection.socket.send(JSON.stringify({ type: 'READINESS_UPDATED', id: payload.id, payload: readiness }));
+          connection.socket.send(JSON.stringify({ type: 'READINESS_UPDATED', protocolVersion: PROTOCOL_VERSION, id: payload.id, payload: { ...readiness, revision: ++snapshotRevision } }));
           return;
         }
 
         if (payload.type === 'SNAPSHOT_REQUEST') {
           if (!isAuthenticated) return;
-          const readiness = evaluateReadiness(currentMarket);
-          const operationalState = determineOperationalState(readiness, currentMarket);
-          const refreshedMarket = currentMarket && adapter
-            ? await adapter.getMarketState(currentMarket.conditionId)
-            : null;
-          if ((refreshedMarket || currentMarket)?.conditionId) {
-            activeMarketId = (refreshedMarket || currentMarket).conditionId;
-            subscribeAdapterToMarket(refreshedMarket || currentMarket);
+          const refreshedMarket = await getAuthoritativeMarket(true);
+          const readiness = evaluateReadiness(refreshedMarket);
+          const operationalState = determineOperationalState(readiness, refreshedMarket);
+          if (refreshedMarket?.conditionId) {
+            activeMarketId = refreshedMarket.conditionId;
           }
           const discoveredMarkets = globalDiscoveryService ? globalDiscoveryService.getMarkets() : [];
           const snapshotMarkets = refreshedMarket
@@ -486,25 +679,30 @@ export async function registerRoutes(app: FastifyInstance) {
             : discoveredMarkets;
 
           const orders = getPanelOrders(db);
-          const positions = await getPanelPositions(db, refreshedMarket || currentMarket);
+          const positions = await getPanelPositions(db, refreshedMarket);
           const balance = adapter ? await adapter.getBalance() : 0;
           const account = adapter ? await adapter.getAccountState() : undefined;
+          if (account) { lastAccountState = account; lastAccountStateAt = Date.now(); }
           
           const presetsRows = db.prepare('SELECT * FROM presets').all() as any[];
           const presets = presetsRows.map(r => ({ id: r.id, name: r.name, ...JSON.parse(r.config) }));
 
-          const anchor = currentMarket ? getMarketAnchor(currentMarket.conditionId) : undefined;
+          const anchor = refreshedMarket ? getMarketAnchor(refreshedMarket.conditionId) : undefined;
 
           connection.socket.send(JSON.stringify({
-            type: 'SNAPSHOT',
+            type: 'TERMINAL_SNAPSHOT', protocolVersion: PROTOCOL_VERSION,
             id: payload.id,
             payload: {
+              protocolVersion: PROTOCOL_VERSION,
+              revision: ++snapshotRevision,
+              publishedAt: Date.now(),
               operationalState,
               readiness,
               account,
-              market: refreshedMarket || currentMarket,
+              market: refreshedMarket,
               markets: snapshotMarkets,
               anchor,
+              reference: getRtdsMetrics(),
               orders,
               positions,
               balance,
@@ -516,7 +714,117 @@ export async function registerRoutes(app: FastifyInstance) {
           return;
         }
 
+        if (payload.type === 'REQUEST_QUOTES') {
+          const market = currentMarket && currentMarket.conditionId === payload.payload?.conditionId
+            ? await adapter.getMarketState(currentMarket.conditionId) : null;
+          if (!market || market.stale) throw new Error('Authoritative current market book is unavailable or stale');
+          const outcome = payload.payload?.outcome as 'UP' | 'DOWN';
+          const tokenId = outcome === 'UP' ? (market.upTokenId || market.yesTokenId) : (market.downTokenId || market.noTokenId);
+          const bid = parseFloat(outcome === 'UP' ? market.upBid : market.downBid);
+          const ask = parseFloat(outcome === 'UP' ? market.upAsk : market.downAsk);
+          if (!tokenId || !(bid > 0) || !(ask > 0) || bid > ask) throw new Error('Both coherent outcome books are required');
+          const revision = Number(market.revision || market.lastUpdated || 0);
+          const bookVersion = Number((outcome === 'UP' ? market.upBook?.version : market.downBook?.version) || revision);
+          const tick = parseFloat(market.tickSize || '0.01');
+          const slippage = Math.min(loadConfig().MAX_FAK_SLIPPAGE_BPS, Number(payload.payload?.slippageBps || 0)) / 10000;
+          const presetEngine = new PresetEngine();
+          const presets = (db.prepare('SELECT * FROM presets').all() as any[])
+            .map(row => { try { return { id: row.id, name: row.name, ...JSON.parse(row.config) }; } catch { return null; } })
+            .filter(Boolean).filter((preset: any) => preset.active !== false);
+          const makerQuotes = presets.map((preset: any) => {
+            const side = preset.side as 'BUY' | 'SELL';
+            const referenceType = preset.reference || (side === 'BUY' ? 'BEST_ASK' : 'BEST_BID');
+            const reference = referenceType === 'BEST_BID' ? bid : referenceType === 'BEST_ASK' ? ask : (bid + ask) / 2;
+            const target = presetEngine.calculate(reference, preset.mode, Number(preset.value || 0));
+            return { ...executionService!.quotes.create({ conditionId: market.conditionId, tokenId, outcome, side, executionMode: 'MAKER',
+              referenceType, referencePrice: target, makerBoundary: side === 'BUY' ? ask : bid, tickSize: tick,
+              marketRevision: revision, bookVersion, requestedDollars: Number(payload.payload?.requestedDollars || 0),
+              requestedShares: Number(payload.payload?.requestedShares || 0) }), presetId: preset.id };
+          });
+          const quotes = [...makerQuotes,
+            executionService!.quotes.create({ conditionId: market.conditionId, tokenId, outcome, side: 'BUY', executionMode: 'IMMEDIATE',
+              referenceType: 'BEST_ASK', referencePrice: ask * (1 + slippage), tickSize: tick, marketRevision: revision, bookVersion,
+              requestedDollars: Number(payload.payload?.requestedDollars || 0) }),
+            executionService!.quotes.create({ conditionId: market.conditionId, tokenId, outcome, side: 'SELL', executionMode: 'IMMEDIATE',
+              referenceType: 'BEST_BID', referencePrice: bid * (1 - slippage), tickSize: tick, marketRevision: revision, bookVersion,
+              requestedShares: Number(payload.payload?.requestedShares || 0) }),
+          ];
+          connection.socket.send(JSON.stringify({ type: 'EXECUTABLE_QUOTES_UPDATED', protocolVersion: PROTOCOL_VERSION, id: payload.id,
+            payload: { conditionId: market.conditionId, outcome, marketRevision: revision, revision: ++snapshotRevision, quotes } }));
+          return;
+        }
+
+        if (payload.type === 'PLACE_ORDER_INTENT') {
+          const validation = OrderIntentSchema.safeParse(payload.payload);
+          if (!validation.success) throw new Error('Invalid order intent');
+          const intent = validation.data;
+          if (!intent.quoteId) throw new Error('Executable quote is required');
+          if (!currentMarket || currentMarket.conditionId !== intent.conditionId) throw new Error('Order is not bound to the authoritative current market');
+          const authoritativeToken = intent.outcome === 'UP'
+            ? (currentMarket.upTokenId || currentMarket.yesTokenId) : (currentMarket.downTokenId || currentMarket.noTokenId);
+          if (!authoritativeToken || authoritativeToken !== intent.tokenId) throw new Error('Order token does not match the selected market outcome');
+          const readiness = evaluateReadiness(currentMarket);
+          if (!readiness.executionPermitted) throw new Error(`Order blocked: ${readiness.blockingReasons.join('; ')}`);
+          const market = await adapter.getMarketState(currentMarket.conditionId);
+          const revision = Number(market?.revision || market?.lastUpdated || 0);
+          const bookVersion = Number((intent.outcome === 'UP' ? market?.upBook?.version : market?.downBook?.version) || revision);
+          const prior = db.prepare('SELECT status,response,createdAt FROM idempotency WHERE requestId=?').get(intent.requestId) as any;
+          if (prior?.response) { connection.socket.send(prior.response); return; }
+          if (prior) {
+            const order = db.prepare('SELECT * FROM orders WHERE clientRequestId=?').get(intent.requestId) as any;
+            const result = order
+              ? { result: order.submissionResult || 'AMBIGUOUS', requestId: intent.requestId, orderId: order.id,
+                  remoteOrderId: order.remoteOrderId || undefined, requestedAmount: intent.side === 'BUY' ? order.dollarSpend : order.requestedShares,
+                  executedAmount: order.filledShares || '0', unfilledAmount: order.remainingShares || undefined,
+                  filledShares: order.filledShares || '0', averageExecutionPrice: order.averageFillPrice || undefined,
+                  fee: order.fees || undefined, remoteTradeIds: [], errorMessage: order.errorMessage || 'Recovered request requires reconciliation' }
+              : { result: 'REJECTED', requestId: intent.requestId, orderId: `interrupted_${intent.requestId}`,
+                  remoteTradeIds: [], errorCode: 'INTERRUPTED_BEFORE_RESERVATION', errorMessage: 'The prior request stopped before a local order was reserved' };
+            if (order && !order.submissionResult) {
+              db.prepare("UPDATE orders SET status='RECONCILING',remoteState='UNKNOWN',submissionResult='AMBIGUOUS',reconciliationRequired=1,updatedAt=? WHERE id=?")
+                .run(Date.now(), order.id);
+              disarmLive('RECOVERED_IN_PROGRESS_ORDER');
+            }
+            const replay = JSON.stringify({ type: 'ORDER_RESULT', protocolVersion: PROTOCOL_VERSION, id: payload.id,
+              payload: { ...result, revision: ++snapshotRevision } });
+            db.prepare('UPDATE idempotency SET status=?,response=?,updatedAt=? WHERE requestId=?')
+              .run(result.result, replay, Date.now(), intent.requestId);
+            connection.socket.send(replay);
+            return;
+          }
+          db.prepare("INSERT INTO idempotency (requestId,status,createdAt,updatedAt) VALUES (?,'RESERVED',?,?)")
+            .run(intent.requestId, Date.now(), Date.now());
+          try {
+            const quote = executionService!.quotes.consume(intent.quoteId, intent, { marketRevision: revision, bookVersion });
+            const requestedShares = intent.side === 'BUY'
+              ? parseFloat(intent.dollarSpend || '0') / parseFloat(quote.submittedPrice)
+              : parseFloat(intent.shares || '0');
+            if (requestedShares < parseFloat(currentMarket.minimumOrderSize || '0')) {
+              throw new Error(`Order is below the ${currentMarket.minimumOrderSize} share minimum`);
+            }
+            const response = await executionService!.submit(intent, quote, {
+              balance: await adapter.getBalance(), availableShares: await getAvailableShares(db, intent.tokenId),
+            });
+            const responseText = JSON.stringify({ type: 'ORDER_RESULT', protocolVersion: PROTOCOL_VERSION, id: payload.id,
+              payload: { ...response, revision: ++snapshotRevision } });
+            db.prepare('UPDATE idempotency SET status=?,response=?,updatedAt=? WHERE requestId=?')
+              .run(response.result, responseText, Date.now(), intent.requestId);
+            connection.socket.send(responseText);
+          } catch (error: any) {
+            const responseText = JSON.stringify({ type: 'ERROR', protocolVersion: PROTOCOL_VERSION, id: payload.id,
+              payload: { message: error.message, code: 'ORDER_REJECTED' } });
+            db.prepare("UPDATE idempotency SET status='FAILED',response=?,updatedAt=? WHERE requestId=?")
+              .run(responseText, Date.now(), intent.requestId);
+            connection.socket.send(responseText);
+          }
+          return;
+        }
+
         if (payload.type === 'PLACE_ORDER') {
+          connection.socket.send(JSON.stringify({ type: 'PROTOCOL_ERROR', protocolVersion: PROTOCOL_VERSION, id: payload.id,
+            payload: { code: 'QUOTE_REQUIRED', message: 'Legacy unquoted order submission is disabled; request an executable quote' } }));
+          return;
+          /* Legacy implementation retained temporarily below for historical comparison only.
           if (!isAuthenticated) return;
           
           const requestId = payload.id || crypto.randomUUID();
@@ -632,70 +940,91 @@ export async function registerRoutes(app: FastifyInstance) {
             db.prepare(`UPDATE idempotency SET status='FAILED', updatedAt=? WHERE requestId=?`).run(Date.now(), requestId);
             connection.socket.send(JSON.stringify({ type: 'ERROR', error: err.message, id: requestId }));
           }
+        } */
         }
         else if (payload.type === 'CANCEL_ORDER') {
           if (!isAuthenticated) return;
           const validation = CancelOrderSchema.safeParse(payload.payload);
           if (!validation.success) {
-            connection.socket.send(JSON.stringify({ type: 'ERROR', error: 'Invalid order parameters', id: payload.id }));
+            connection.socket.send(JSON.stringify({ type: 'ERROR', protocolVersion: PROTOCOL_VERSION, error: 'Invalid order parameters', id: payload.id }));
             return;
           }
 
           const { orderId } = validation.data;
           try {
             if (!adapter) throw new Error('Adapter not initialized');
-            const success = await adapter.cancelOrder(orderId);
+            const localOrder = db.prepare('SELECT * FROM orders WHERE id=? OR remoteOrderId=?').get(orderId, orderId) as any;
+            if (!localOrder) throw new Error('Order not found');
+            executionService!.lifecycle.markCancelPending(localOrder.id);
+            const success = await adapter.cancelOrder(localOrder.remoteOrderId || localOrder.id);
             if (success) {
-              db.prepare(`UPDATE orders SET status='CANCELLED', remoteState='CANCELLED', updatedAt=? WHERE id=?`).run(Date.now(), orderId);
+              executionService!.lifecycle.confirmCancelled(localOrder.id);
+            } else {
+              db.prepare(`UPDATE orders SET status='RECONCILING',remoteState='CANCEL_UNKNOWN',reconciliationRequired=1,updatedAt=? WHERE id=?`)
+                .run(Date.now(), localOrder.id);
+              disarmLive('AMBIGUOUS_CANCELLATION');
             }
-            const storedOrder = normalizeOrderRow(db.prepare(`SELECT * FROM orders WHERE id = ?`).get(orderId));
-            const responseMsg = JSON.stringify({ type: 'ORDER_UPDATE', id: payload.id, payload: storedOrder || { id: orderId, status: success ? 'CANCELLED' : 'ERROR' } });
+            const storedOrder = normalizeOrderRow(db.prepare(`SELECT * FROM orders WHERE id = ?`).get(localOrder.id));
+            const responseMsg = JSON.stringify({ type: 'ORDER_UPDATE', protocolVersion: PROTOCOL_VERSION, id: payload.id,
+              payload: { ...storedOrder, revision: ++snapshotRevision } });
             connection.socket.send(responseMsg);
           } catch (e: any) {
-            connection.socket.send(JSON.stringify({ type: 'ERROR', error: e.message, id: payload.id }));
+            const localOrder = db.prepare('SELECT id FROM orders WHERE id=? OR remoteOrderId=?').get(orderId, orderId) as any;
+            if (localOrder) {
+              db.prepare(`UPDATE orders SET status='RECONCILING',remoteState='CANCEL_UNKNOWN',reconciliationRequired=1,errorMessage=?,updatedAt=? WHERE id=?`)
+                .run(e.message, Date.now(), localOrder.id);
+              db.prepare("UPDATE reservations SET state='RECONCILING',updatedAt=? WHERE orderId=?").run(Date.now(), localOrder.id);
+            }
+            disarmLive('AMBIGUOUS_CANCELLATION');
+            connection.socket.send(JSON.stringify({ type: 'ERROR', protocolVersion: PROTOCOL_VERSION, error: e.message, id: payload.id }));
           }
         }
         else if (payload.type === 'CANCEL_ALL') {
           if (!isAuthenticated) return;
           try {
             if (!adapter) throw new Error('Adapter not initialized');
-            await adapter.cancelAll();
-            db.prepare(`UPDATE orders SET status='CANCELLED', remoteState='CANCELLED', updatedAt=? WHERE status IN ('PENDING', 'OPEN', 'NEW', 'LIVE', 'SUBMITTING', 'ACCEPTED', 'PARTIALLY_FILLED', 'CANCEL_PENDING', 'RECONCILING')`).run(Date.now());
-            connection.socket.send(JSON.stringify({ type: 'SNAPSHOT_REQUEST', id: payload.id }));
+            const result = await adapter.cancelAll();
+            const localByRemoteId = new Map((db.prepare(`SELECT id,remoteOrderId FROM orders WHERE status IN (${ACTIVE_ORDER_STATUS_SQL}) AND remoteOrderId IS NOT NULL`).all() as any[])
+              .map(order => [String(order.remoteOrderId), String(order.id)]));
+            db.transaction(() => {
+              for (const remoteOrderId of result.confirmedOrderIds) {
+                const localId = localByRemoteId.get(remoteOrderId);
+                if (localId) executionService!.lifecycle.confirmCancelled(localId);
+              }
+              for (const remoteOrderId of result.unresolvedOrderIds) {
+                const localId = localByRemoteId.get(remoteOrderId);
+                if (!localId) continue;
+                db.prepare(`UPDATE orders SET status='RECONCILING',remoteState='CANCEL_UNKNOWN',reconciliationRequired=1,updatedAt=? WHERE id=?`)
+                  .run(Date.now(), localId);
+                db.prepare("UPDATE reservations SET state='RECONCILING',updatedAt=? WHERE orderId=?").run(Date.now(), localId);
+              }
+            })();
+            if (result.unresolvedOrderIds.length === 0) {
+              connection.socket.send(JSON.stringify({ type: 'PROTOCOL_ERROR', protocolVersion: PROTOCOL_VERSION, id: payload.id,
+                payload: { code: 'CANCEL_ALL_CONFIRMED', message: `${result.confirmedOrderIds.length} remote order(s) were confirmed cancelled` } }));
+            } else {
+              disarmLive('CANCEL_ALL_RECONCILIATION');
+              connection.socket.send(JSON.stringify({ type: 'PROTOCOL_ERROR', protocolVersion: PROTOCOL_VERSION, id: payload.id,
+                payload: { code: 'CANCEL_RECONCILING', message: `${result.unresolvedOrderIds.length} targeted cancellation(s) require reconciliation` } }));
+            }
           } catch (e: any) {
-            connection.socket.send(JSON.stringify({ type: 'ERROR', error: e.message, id: payload.id }));
+            disarmLive('AMBIGUOUS_CANCEL_ALL');
+            connection.socket.send(JSON.stringify({ type: 'ERROR', protocolVersion: PROTOCOL_VERSION, error: e.message, id: payload.id }));
           }
         }
         else if (payload.type === 'SUBSCRIBE_MARKET' || payload.type === 'SELECT_MARKET') {
-          if (!isAuthenticated) return;
-          
-          const validation = SubscribeMarketSchema.safeParse(payload.payload);
-          if (!validation.success) {
-            connection.socket.send(JSON.stringify({ type: 'ERROR', error: 'Invalid market subscription request' }));
-            return;
-          }
-          
-          activeMarketId = validation.data.conditionId;
-          const upToken = validation.data.upTokenId || validation.data.yesTokenId || '';
-          const downToken = validation.data.downTokenId || validation.data.noTokenId || '';
-          if (upToken && downToken && adapter) {
-            subscribeAdapterToMarket({
-              conditionId: validation.data.conditionId,
-              upTokenId: upToken,
-              downTokenId: downToken,
-            });
-            const selectedMarket = globalDiscoveryService
-              ? globalDiscoveryService.getMarkets().find((market: any) => market.conditionId === validation.data.conditionId)
-              : null;
-            setActiveMarketAnchor(validation.data.conditionId, selectedMarket?.startTime || Date.now());
-          }
+          const conditionId = String(payload.payload?.conditionId || '');
+          const selectedMarket = globalDiscoveryService
+            ? globalDiscoveryService.getMarkets().find((market: any) => market.conditionId === conditionId) : null;
+          if (!selectedMarket) throw new Error('Market is not present in authoritative discovery');
+          activeMarketId = conditionId;
+          subscribeAdapterToMarket(selectedMarket);
+          setActiveMarketAnchor(conditionId, selectedMarket.startTime || 0);
         }
         else if (payload.type === 'PAGE_ANCHOR_UPDATE') {
-          if (!isAuthenticated) return;
-
           const validation = PageAnchorSchema.safeParse(payload.payload);
           if (!validation.success) {
-            connection.socket.send(JSON.stringify({ type: 'ERROR', error: 'Invalid page anchor update', id: payload.id }));
+            connection.socket.send(JSON.stringify({ type: 'ERROR', protocolVersion: PROTOCOL_VERSION, error: 'Invalid page anchor update', id: payload.id }));
             return;
           }
 
@@ -704,41 +1033,57 @@ export async function registerRoutes(app: FastifyInstance) {
           const selectedMarket = markets.find((market: any) => market.slug === validation.data.slug) || current;
           if (!selectedMarket || selectedMarket.slug !== validation.data.slug) return;
 
-          const normalizedPrice = String(parseFloat(validation.data.priceToBeat.replace(/,/g, '')));
-          const anchor = setPageMarketAnchor(
-            selectedMarket.conditionId,
-            selectedMarket.startTime || Date.now(),
-            normalizedPrice
-          );
-          const readiness = evaluateReadiness(selectedMarket);
-          const operationalState = determineOperationalState(readiness, selectedMarket);
-          const metrics = getRtdsMetrics();
-          connection.socket.send(JSON.stringify({
-            type: 'SNAPSHOT',
-            id: payload.id,
-            payload: {
-              operationalState,
-              readiness,
-              market: selectedMarket,
-              anchor,
-              orders: getPanelOrders(db),
-              positions: await getPanelPositions(db, selectedMarket),
-              balance: adapter ? await adapter.getBalance() : 0,
-              markets,
-              realizedPnl: 0,
-              presets: (db.prepare('SELECT * FROM presets').all() as any[]).map(r => ({ id: r.id, name: r.name, ...JSON.parse(r.config) })),
-              settings: {}
+          connection.socket.send(JSON.stringify({ type: 'PROTOCOL_ERROR', protocolVersion: PROTOCOL_VERSION, id: payload.id,
+            payload: { code: 'PAGE_CONTEXT_INFORMATIONAL', message: 'Page price is displayed for lag comparison and cannot change the execution market or opening anchor' } }));
+        }
+        else if (payload.type === 'UPDATE_SETTINGS' || payload.type === 'UPDATE_SIZE_PRESETS') {
+          const body = payload.payload as Record<string, unknown>;
+          const allowed = new Set(['maxLoss','maxProfit','buySizesUsd','sellPercentages','panelMode','dockSide','panelWidth','activeTab','executionMode','pageFollowPreference','cancelOnShutdown']);
+          const insert = db.prepare('INSERT INTO settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
+          db.transaction(() => {
+            for (const [key, value] of Object.entries(body || {})) {
+              if (!allowed.has(key)) throw new Error(`Unsupported setting: ${key}`);
+              insert.run(key, typeof value === 'string' ? value : JSON.stringify(value));
             }
-          }));
-          connection.socket.send(JSON.stringify({ type: 'REFERENCE_UPDATED', id: payload.id, payload: metrics }));
+          })();
+          connection.socket.send(JSON.stringify({ type: 'SETTINGS_UPDATED', protocolVersion: PROTOCOL_VERSION, id: payload.id, payload: { ...body, revision: ++snapshotRevision } }));
+        }
+        else if (payload.type === 'UPDATE_PRESETS') {
+          const rows = z.array(z.object({ id: z.string(), name: z.string() }).passthrough()).parse(payload.payload);
+          const insert = db.prepare('INSERT INTO presets (id,name,config) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,config=excluded.config');
+          db.transaction(() => rows.forEach(row => insert.run(row.id, row.name, JSON.stringify(row))))();
+          connection.socket.send(JSON.stringify({ type: 'SETTINGS_UPDATED', protocolVersion: PROTOCOL_VERSION, id: payload.id, payload: { presets: rows, revision: ++snapshotRevision } }));
+        }
+        else if (payload.type === 'PING') {
+          connection.socket.send(JSON.stringify({ type: 'HELLO_ACK', protocolVersion: PROTOCOL_VERSION, id: payload.id,
+            payload: { protocolVersion: PROTOCOL_VERSION, serverVersion: '2.0.0', sessionId: String((connection.socket as any).sessionId || '') } }));
+        }
+        else if (payload.type === 'RECONCILE') {
+          const runId = crypto.randomUUID();
+          db.prepare(`INSERT INTO reconciliation_runs (id,reason,status,startedAt) VALUES (?,'OPERATOR','RUNNING',?)`).run(runId, Date.now());
+          try {
+            await adapter.reconcile();
+            const unresolved = Number((db.prepare("SELECT COUNT(*) count FROM orders WHERE reconciliationRequired=1 OR status='RECONCILING'").get() as any)?.count || 0);
+            db.prepare(`UPDATE reconciliation_runs SET status=?,completedAt=?,unresolvedCount=? WHERE id=?`)
+              .run(unresolved === 0 ? 'COMPLETED' : 'COMPLETED_WITH_DISCREPANCIES', Date.now(), unresolved, runId);
+            connection.socket.send(JSON.stringify({ type: 'PROTOCOL_ERROR', protocolVersion: PROTOCOL_VERSION, id: payload.id,
+              payload: { code: 'RECONCILIATION_COMPLETE', message: unresolved ? `${unresolved} item(s) still require review` : 'Reconciliation completed' } }));
+          } catch (error: any) {
+            db.prepare(`UPDATE reconciliation_runs SET status='FAILED',completedAt=?,errorMessage=? WHERE id=?`).run(Date.now(), error.message, runId);
+            disarmLive('RECONCILIATION_FAILED');
+            throw error;
+          }
         }
       } catch (err: any) {
-        connection.socket.send(JSON.stringify({ type: 'ERROR', error: err.message }));
+        connection.socket.send(JSON.stringify({ type: 'ERROR', protocolVersion: PROTOCOL_VERSION, error: err.message }));
       }
     });
 
     connection.socket.on('close', () => {
       clearInterval(intervalId);
+      clearTimeout(authTimeout);
+      try { getDb().prepare('UPDATE extension_sessions SET closedAt=?,lastSeenAt=? WHERE id=?').run(Date.now(), Date.now(), sessionId); } catch {}
+      try { getDb().prepare(`INSERT INTO connection_events (subsystem,state,reason,timestamp) VALUES ('EXTENSION','DISCONNECTED',?,?)`).run(sessionId, Date.now()); } catch {}
     });
   });
 }
