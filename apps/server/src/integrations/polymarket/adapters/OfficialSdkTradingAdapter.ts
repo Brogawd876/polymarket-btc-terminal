@@ -14,6 +14,7 @@ import {
   messageSourceTimestamp,
   normalizeSourceTimestamp,
   privateEventKey,
+  toPublicBookState,
 } from './streamUtils';
 
 const PRIVATE_KEY = process.env.PRIVATE_KEY || '';
@@ -697,27 +698,23 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
       bookSourceTimestamp: oldestSourceTimestamp,
       bookReceiveTimestamp: Math.min(upOb?.receiveTimestamp || 0, downOb?.receiveTimestamp || 0),
       bookAgeMs: oldestSourceTimestamp > 0 ? Math.max(0, now - oldestSourceTimestamp) : Number.MAX_SAFE_INTEGER,
-      upBook: this.publicBookState(upOb, upStaleReason, now),
-      downBook: this.publicBookState(downOb, downStaleReason, now),
+      upBook: toPublicBookState(
+        upOb,
+        tokens.upTokenId,
+        'UP',
+        upOb?.tickSize || existing?.tickSize || '0.01',
+        existing?.minimumOrderSize || '5',
+        upStaleReason,
+      ),
+      downBook: toPublicBookState(
+        downOb,
+        tokens.downTokenId,
+        'DOWN',
+        downOb?.tickSize || existing?.tickSize || '0.01',
+        existing?.minimumOrderSize || '5',
+        downStaleReason,
+      ),
     } as MarketState);
-  }
-
-  private publicBookState(book: LocalOrderBook | undefined, staleReason: string | undefined, now: number) {
-    if (!book) return undefined;
-    return {
-      bid: this.getBestBid(book.bids),
-      ask: this.getBestAsk(book.asks),
-      spread: Number(this.getBestAsk(book.asks)) - Number(this.getBestBid(book.bids)),
-      depth: { bids: book.bids, asks: book.asks },
-      lastTrade: book.lastTradePrice,
-      tick: book.tickSize,
-      sourceTimestamp: book.sourceTimestamp,
-      receiveTimestamp: book.receiveTimestamp,
-      version: book.version,
-      quality: staleReason ? 'STALE' : 'GOOD',
-      staleReason,
-      dataAgeMs: book.sourceTimestamp > 0 ? Math.max(0, now - book.sourceTimestamp) : Number.MAX_SAFE_INTEGER,
-    };
   }
 
   private resolveCrossedQuote(bid: string, ask: string, previousBid?: string, previousAsk?: string): { bid: string, ask: string } {

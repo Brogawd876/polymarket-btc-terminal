@@ -1,3 +1,5 @@
+import type { BookQuality, BookState, Outcome } from '@polymarket-btc/shared';
+
 export interface PriceLevel {
   price: string;
   size: string;
@@ -138,6 +140,48 @@ export function bookStaleReason(
   if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid <= 0 || ask <= 0) return 'BOOK_INCOMPLETE';
   if (bid > ask) return 'BOOK_CROSSED';
   return undefined;
+}
+
+export function toPublicBookState(
+  book: LocalOrderBook | undefined,
+  tokenId: string,
+  outcome: Outcome,
+  tickSize: string,
+  minimumOrderSize: string,
+  staleReason?: string,
+): BookState | undefined {
+  if (!book) return undefined;
+
+  const bid = bestPrice(book.bids, 'bid');
+  const ask = bestPrice(book.asks, 'ask');
+  const spreadValue = Number(ask) - Number(bid);
+  const spread = Number.isFinite(spreadValue) && spreadValue >= 0
+    ? spreadValue.toFixed(8).replace(/\.?0+$/, '') || '0'
+    : undefined;
+  const qualityByReason: Record<string, BookQuality> = {
+    BOOK_NOT_INITIALIZED: 'INITIALIZING',
+    BOOK_SOURCE_STALE: 'STALE',
+    BOOK_INCOMPLETE: 'INCOMPLETE',
+    BOOK_CROSSED: 'CROSSED',
+  };
+  const quality = staleReason ? qualityByReason[staleReason] || 'INVALID' : 'FRESH';
+
+  return {
+    tokenId,
+    outcome,
+    bid,
+    ask,
+    spread,
+    lastTrade: book.lastTradePrice,
+    tickSize: book.tickSize || tickSize,
+    minimumOrderSize,
+    exchangeTimestamp: book.sourceTimestamp || undefined,
+    receiveTimestamp: book.receiveTimestamp,
+    lastGoodTimestamp: quality === 'FRESH' || quality === 'STALE' ? book.sourceTimestamp || undefined : undefined,
+    version: book.version,
+    quality,
+    staleReason,
+  };
 }
 
 export function privateEventKey(item: any): string | undefined {

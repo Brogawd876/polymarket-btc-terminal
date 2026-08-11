@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { BookStateSchema } from '@polymarket-btc/shared';
 import {
   applyBookDelta,
   applyBookSnapshot,
   bookStaleReason,
   privateEventKey,
+  toPublicBookState,
 } from './streamUtils';
 
 describe('Polymarket stream book handling', () => {
@@ -65,5 +67,27 @@ describe('Polymarket stream book handling', () => {
     const event = { event_type: 'trade', id: 'trade-1', status: 'MATCHED', last_update: '123' };
     expect(privateEventKey(event)).toBe('trade:trade-1:MATCHED:123');
     expect(privateEventKey({ event_type: 'trade' })).toBeUndefined();
+  });
+
+  it('publishes canonical protocol book state', () => {
+    const book = applyBookSnapshot(undefined, {
+      timestamp: 1_700_000_000_000,
+      tick_size: '0.01',
+      last_trade_price: '0.50',
+      bids: [{ price: '0.49', size: '2' }],
+      asks: [{ price: '0.51', size: '3' }],
+    }, 1_700_000_000_100);
+
+    const published = toPublicBookState(book, 'up-token', 'UP', '0.01', '5');
+
+    expect(BookStateSchema.safeParse(published).success).toBe(true);
+    expect(published).toMatchObject({
+      tokenId: 'up-token',
+      outcome: 'UP',
+      spread: '0.02',
+      tickSize: '0.01',
+      minimumOrderSize: '5',
+      quality: 'FRESH',
+    });
   });
 });
