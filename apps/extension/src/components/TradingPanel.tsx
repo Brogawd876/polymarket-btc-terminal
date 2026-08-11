@@ -10,7 +10,7 @@ import type {
   Outcome,
   ExecutableQuote,
 } from '@polymarket-btc/shared';
-import { AlertTriangle, Play, Square, Zap } from 'lucide-react';
+import { AlertTriangle, Play, Square, Zap, Loader2 } from 'lucide-react';
 import { RequestGate } from '../requestGate';
 import type { ExecutionMode, PageFollowPreference } from '../uiPreferences';
 
@@ -35,6 +35,7 @@ interface Props {
   lastResponseId?: string | null;
   lastResponseType?: string | null;
   clearBackendError?: () => void;
+  connected?: boolean;
 }
 
 const DEFAULT_PRESETS: PresetConfig[] = [
@@ -71,7 +72,8 @@ const TradingPanel: React.FC<Props> = ({
   lastResult = 'No command result yet',
   lastResponseId = null,
   lastResponseType = null,
-  clearBackendError
+  clearBackendError,
+  connected
 }) => {
   const [buyUsdSpend, setBuyUsdSpend] = useState<string>('25');
   const [sellShares, setSellShares] = useState<string>('');
@@ -114,7 +116,7 @@ const TradingPanel: React.FC<Props> = ({
 
   useEffect(() => {
     if (!activeOrderRequestId.current || lastResponseId !== activeOrderRequestId.current) return;
-    if (!['ORDER_RESULT', 'ERROR'].includes(lastResponseType || '')) return;
+    if (lastResponseType === 'COMMAND_ACCEPTED') return;
     requestGate.current.complete(activeOrderRequestId.current);
     activeOrderRequestId.current = null;
     setIsSubmitting(false);
@@ -171,7 +173,18 @@ const TradingPanel: React.FC<Props> = ({
     sendMessage({ type: 'DISARM_LIVE' });
   };
 
+  useEffect(() => {
+    if (connected === false && isSubmitting) {
+      if (activeOrderRequestId.current) {
+        requestGate.current.complete(activeOrderRequestId.current);
+        activeOrderRequestId.current = null;
+      }
+      setIsSubmitting(false);
+    }
+  }, [connected, isSubmitting]);
+
   const submitOrder = (quote: ExecutableQuote, side: Side, dollarSpend?: string, shares?: string) => {
+    if (isSubmitting) return;
     const requestId = crypto.randomUUID();
     if (!requestGate.current.begin(requestId)) return;
     activeOrderRequestId.current = requestId;
@@ -201,6 +214,15 @@ const TradingPanel: React.FC<Props> = ({
       requestGate.current.complete(requestId);
       activeOrderRequestId.current = null;
       setIsSubmitting(false);
+    } else {
+      setTimeout(() => {
+        if (activeOrderRequestId.current === requestId) {
+          requestGate.current.complete(requestId);
+          activeOrderRequestId.current = null;
+          setIsSubmitting(false);
+          setError('Order request timed out');
+        }
+      }, 5000);
     }
   };
 
@@ -248,7 +270,7 @@ const TradingPanel: React.FC<Props> = ({
   const oneTapSellShares = parseFloat(sellShares || defaultSellShares) || 0;
   const oneTapBuyValid = hasEnoughBalance && oneTapBuyShares > 0 && (minimumOrderSize <= 0 || oneTapBuyShares >= minimumOrderSize);
   const oneTapSellValid = oneTapSellShares > 0 && oneTapSellShares <= availableShares && (minimumOrderSize <= 0 || oneTapSellShares >= minimumOrderSize);
-  const activeOrders = orders.filter(order => !['CANCELLED', 'FILLED', 'REJECTED', 'EXPIRED'].includes(order.status));
+  const activeOrders = orders.filter(order => !['CANCELLED', 'CANCELED', 'FILLED', 'REJECTED', 'EXPIRED'].includes(order.status));
   const handleCancelAll = () => sendMessage({ type: 'CANCEL_ALL', payload: marketInfo?.conditionId ? { conditionId: marketInfo.conditionId } : undefined });
 
   return (
@@ -422,22 +444,22 @@ const TradingPanel: React.FC<Props> = ({
         </button>
       </div>
 
-      <div className="flex gap-1.5">
+      <div className="flex bg-gray-900 rounded p-1 shadow-inner border border-gray-700">
         <button 
           onClick={() => setActiveOutcome('UP')}
-          className={`flex-1 py-1.5 rounded font-bold text-xs border transition-colors ${
-            activeOutcome === 'UP' ? 'bg-green-700 border-green-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700'
+          className={`flex-1 py-1.5 rounded font-bold text-xs transition-colors ${
+            activeOutcome === 'UP' ? 'bg-green-700 text-white shadow' : 'text-gray-500 hover:text-gray-300'
           }`}
         >
-          UP OUTCOME
+          UP
         </button>
         <button 
           onClick={() => setActiveOutcome('DOWN')}
-          className={`flex-1 py-1.5 rounded font-bold text-xs border transition-colors ${
-            activeOutcome === 'DOWN' ? 'bg-red-700 border-red-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700'
+          className={`flex-1 py-1.5 rounded font-bold text-xs transition-colors ${
+            activeOutcome === 'DOWN' ? 'bg-red-700 text-white shadow' : 'text-gray-500 hover:text-gray-300'
           }`}
         >
-          DOWN OUTCOME
+          DOWN
         </button>
       </div>
 
@@ -474,6 +496,8 @@ const TradingPanel: React.FC<Props> = ({
         <div className="flex items-center gap-2">
           <label className="text-[10px] text-gray-400">Custom USD:</label>
           <input 
+            id="buy-usd-spend"
+            name="buyUsdSpend"
             type="number"
             value={buyUsdSpend}
             onChange={e => setBuyUsdSpend(e.target.value)}
@@ -504,7 +528,10 @@ const TradingPanel: React.FC<Props> = ({
                 className="bg-green-700 hover:bg-green-600 disabled:opacity-40 py-2 rounded text-center font-mono font-bold text-white border border-green-500/50 shadow flex flex-col items-center justify-center"
                 title={`${preset.name} - Est Shares: ${shares}${!meetsMinimumSize ? `; minimum ${minimumOrderSize} shares` : ''}`}
               >
-                <span className="text-sm">[{priceCents}¢]</span>
+                <span className="text-sm font-bold flex items-center justify-center gap-1">
+                  {isSubmitting && <Loader2 size={12} className="animate-spin" />}
+                  BUY {activeOutcome} [{priceCents}¢]
+                </span>
                 <span className="text-[9px] text-green-200 font-normal">(${buyUsdSpend})</span>
               </button>
             );
@@ -536,6 +563,8 @@ const TradingPanel: React.FC<Props> = ({
         <div className="flex items-center gap-2">
           <label className="text-[10px] text-gray-400">Custom Shares:</label>
           <input 
+            id="sell-shares"
+            name="sellShares"
             type="number"
             value={sellShares}
             onChange={e => setSellShares(e.target.value)}
@@ -562,7 +591,10 @@ const TradingPanel: React.FC<Props> = ({
                 className="bg-red-700 hover:bg-red-600 disabled:opacity-40 py-2 rounded text-center font-mono font-bold text-white border border-red-500/50 shadow flex flex-col items-center justify-center"
                 title={`${preset.name} - Shares: ${sharesToSell}${sharesToSellNum > availableShares ? '; exceeds held shares' : ''}${minimumOrderSize > 0 && sharesToSellNum < minimumOrderSize ? `; minimum ${minimumOrderSize} shares` : ''}`}
               >
-                <span className="text-sm">[{priceCents}¢]</span>
+                <span className="text-sm font-bold flex items-center justify-center gap-1">
+                  {isSubmitting && <Loader2 size={12} className="animate-spin" />}
+                  SELL {activeOutcome} [{priceCents}¢]
+                </span>
                 <span className="text-[9px] text-red-200 font-normal">({sharesToSell} sh)</span>
               </button>
             );
@@ -611,7 +643,10 @@ const TradingPanel: React.FC<Props> = ({
               className="bg-green-700 hover:bg-green-600 disabled:opacity-40 py-2.5 rounded text-center font-mono font-bold text-white border border-green-500/60 shadow flex flex-col items-center justify-center"
               title={`Market buy up to $${buyUsdSpend}; estimated ${oneTapBuyShares.toFixed(2)} shares`}
             >
-              <span className="text-sm">BUY {activeOutcome}</span>
+              <span className="text-sm font-bold flex items-center justify-center gap-1">
+                {isSubmitting && <Loader2 size={12} className="animate-spin" />}
+                BUY {activeOutcome}
+              </span>
               <span className="text-[9px] text-green-200 font-normal">${buyUsdSpend} now</span>
             </button>
             <button
@@ -620,7 +655,10 @@ const TradingPanel: React.FC<Props> = ({
               className="bg-red-700 hover:bg-red-600 disabled:opacity-40 py-2.5 rounded text-center font-mono font-bold text-white border border-red-500/60 shadow flex flex-col items-center justify-center"
               title={`Market sell ${oneTapSellShares.toFixed(4)} shares`}
             >
-              <span className="text-sm">SELL {activeOutcome}</span>
+              <span className="text-sm font-bold flex items-center justify-center gap-1">
+                {isSubmitting && <Loader2 size={12} className="animate-spin" />}
+                SELL {activeOutcome}
+              </span>
               <span className="text-[9px] text-red-200 font-normal">{oneTapSellShares.toFixed(2)} sh now</span>
             </button>
           </div>

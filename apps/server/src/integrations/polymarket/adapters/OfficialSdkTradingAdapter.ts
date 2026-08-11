@@ -39,6 +39,36 @@ function normalizeTickSize(value: string): TickSize {
   return SUPPORTED_TICK_SIZES.includes(value as TickSize) ? value as TickSize : '0.01';
 }
 
+async function withRetry<T>(
+  operation: () => Promise<T>,
+  retries = 3,
+  delayMs = 1000,
+  timeoutMs = 15000
+): Promise<T> {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        const timer = setTimeout(() => reject(Object.assign(new Error('ETIMEDOUT'), { code: 'ETIMEDOUT' })), timeoutMs);
+        // We can't easily clear the timeout if operation finishes first without a wrapper class,
+        // but it's safe to let it fire since the Promise is already resolved. 
+        // Wait, Node.js might keep the event loop alive. Let's unref it if possible.
+        if (timer.unref) timer.unref();
+      });
+      return await Promise.race([operation(), timeoutPromise]);
+    } catch (err: any) {
+      const isRateLimit = Number(err?.status || err?.response?.status) === 429;
+      if (isRateLimit && i < retries) {
+        console.warn(`Rate limited (429). Retrying in ${delayMs}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+        delayMs *= 2; // exponential backoff
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('Unreachable');
+}
+
 export class OfficialSdkTradingAdapter extends TradingAdapter {
   private isConnected: boolean = false;
   private userStreamConnected: boolean = false;
@@ -133,6 +163,7 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
       this.connectMarketWs();
       this.pollInterval = setInterval(() => {
         this.reconcileRecentTrades().catch(err => console.error('Trade reconciliation failed:', err));
+        this.reconcileMissingRemoteIds().catch(err => console.error('Missing ID reconciliation failed:', err));
       }, 15000);
 
       this.isConnected = true;
@@ -291,6 +322,25 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
   private releaseReservations(db: any, localOrderId: string, now: number): void {
     db.prepare(`UPDATE reservations SET state = 'RELEASED', updatedAt = ? WHERE orderId = ? AND state NOT IN ('RELEASED', 'CONSUMED')`)
       .run(now, localOrderId);
+  }
+
+  private async reconcileMissingRemoteIds(): Promise<void> {
+    const db = getDb();
+    const threshold = Date.now() - 300000; // 5 minutes
+    try {
+      db.transaction(() => {
+        const stuckOrders = db.prepare(`SELECT id, status FROM orders WHERE status = 'RECONCILING' AND remoteOrderId IS NULL AND createdAt < ?`).all(threshold) as { id: string, status: string }[];
+        for (const order of stuckOrders) {
+          db.prepare(`UPDATE orders SET status = 'REJECTED', remoteState = 'UNKNOWN', submissionResult = 'AMBIGUOUS', reconciliationRequired = 0, errorMessage = 'Timeout waiting for remote order ID', updatedAt = ?, rowVersion = rowVersion + 1 WHERE id = ?`).run(Date.now(), order.id);
+          this.releaseReservations(db, order.id, Date.now());
+          db.prepare(`INSERT INTO order_events (orderId, fromState, toState, source, payload, receiveTimestamp) VALUES (?, ?, 'REJECTED', 'RECONCILIATION', ?, ?)`).run(order.id, order.status, JSON.stringify({ reason: 'MISSING_REMOTE_ORDER_ID_TIMEOUT' }), Date.now());
+          db.prepare(`INSERT INTO outbox_events (eventType,aggregateId,payload,createdAt) VALUES ('ORDER_UPDATED',?,?,?)`).run(order.id, JSON.stringify({ orderId: order.id, from: order.status, to: 'REJECTED', source: 'RECONCILIATION' }), Date.now());
+          console.warn(`Order ${order.id} permanently rejected after timing out without a remoteOrderId.`);
+        }
+      })();
+    } catch (err) {
+      console.error('Failed to reconcile missing remote ids:', err);
+    }
   }
 
   private async reconcileRecentTrades(): Promise<void> {
@@ -1014,16 +1064,15 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
       side: side === 'BUY' ? ClobSide.BUY : ClobSide.SELL,
       size: Number(roundedSize.toFixed(sizePrecision)),
       feeRateBps: 0,
-      nonce: 0,
     };
 
     try {
-      const response = await this.clobClient.createAndPostOrder(
+      const response = await withRetry(() => this.clobClient.createAndPostOrder(
         orderArgs,
         { tickSize: normalizedTickSize },
         OrderType.GTC,
         true
-      );
+      ));
       console.log(`Polymarket CLOB order response: ${JSON.stringify(response)}`);
       
       if ((response as any).error || (response as any).errorMsg || !(response as any).success) {
@@ -1108,11 +1157,11 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
     };
 
     try {
-      const response = await this.clobClient.createAndPostMarketOrder(
+      const response = await withRetry(() => this.clobClient.createAndPostMarketOrder(
         orderArgs,
         { tickSize: normalizedTickSize },
         orderType
-      );
+      ));
       console.log(`Polymarket CLOB market order response: ${JSON.stringify(response)}`);
 
       if ((response as any).error || (response as any).errorMsg || !(response as any).success) {
@@ -1168,14 +1217,18 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
   async cancelOrder(orderId: string): Promise<boolean> {
     if (!this.isConnected) throw new TradingError('Adapter not connected', 'ADAPTER_NOT_CONNECTED');
     try {
-      const response = await this.clobClient.cancelOrder({ orderID: orderId });
+      const response = await withRetry(() => this.clobClient.cancelOrder({ orderID: orderId }));
       let confirmed = this.responseConfirmsCancellation(response, [orderId]);
       if (!confirmed) {
         try {
           const remote = await this.clobClient.getOrder(orderId);
           confirmed = ['canceled', 'cancelled', 'closed'].includes(String((remote as any)?.status || '').toLowerCase());
-        } catch {
-          confirmed = false;
+        } catch (err: any) {
+          if (err?.status === 404 || err?.response?.status === 404 || String(err?.message || '').includes('404')) {
+            confirmed = true;
+          } else {
+            confirmed = false;
+          }
         }
       }
       if (!confirmed) return false;
@@ -1197,7 +1250,7 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
       const before = await this.clobClient.getOpenOrders();
       const targetIds = before.map((order: any) => String(order.id || order.orderID || order.order_id || '')).filter(Boolean);
       if (targetIds.length === 0) return { targetedOrderIds: [], confirmedOrderIds: [], unresolvedOrderIds: [] };
-      const response = await this.clobClient.cancelAll();
+      const response = await withRetry(() => this.clobClient.cancelAll());
       const after = await this.clobClient.getOpenOrders();
       const remaining = new Set(after.map((order: any) => String(order.id || order.orderID || order.order_id || '')));
       const confirmedOrderIds = targetIds.filter((id) => !remaining.has(id));

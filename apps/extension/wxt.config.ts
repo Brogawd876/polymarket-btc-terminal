@@ -9,7 +9,7 @@ export default defineConfig({
     name: 'Polymarket BTC Execution Terminal',
     description: '5-Minute BTC execution terminal for Polymarket',
     version: '1.0.0',
-    permissions: ['storage'],
+    permissions: ['storage', 'alarms'],
     host_permissions: [
       '*://*.polymarket.com/*',
       '*://polymarket.com/*',

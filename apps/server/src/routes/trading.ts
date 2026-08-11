@@ -66,14 +66,24 @@ export class QuoteService {
     return quote;
   }
 
-  consume(quoteId: string, intent: OrderIntent, current: { marketRevision: number; bookVersion: number }): ExecutableQuote {
+  consume(quoteId: string, intent: OrderIntent, current: { marketRevision: number; bookVersion: number; currentBid?: number; currentAsk?: number }): ExecutableQuote {
     const quote = this.quotes.get(quoteId);
     if (!quote) throw new Error('Quote not found or already used');
     this.quotes.delete(quoteId);
     if (Date.now() > quote.expiresAt) throw new Error('Quote expired; request a new quote');
     if (quote.conditionId !== intent.conditionId || quote.tokenId !== intent.tokenId || quote.outcome !== intent.outcome ||
         quote.side !== intent.side || quote.executionMode !== intent.executionMode) throw new Error('Quote binding does not match the order intent');
-    if (quote.marketRevision !== current.marketRevision || quote.bookVersion !== current.bookVersion) throw new Error('Quote is stale');
+    
+    // Check if quote is stale
+    if (quote.marketRevision !== current.marketRevision || quote.bookVersion !== current.bookVersion) {
+      // Relaxed validation: if book version shifted, but the top-of-book price is still exactly what the quote expects, allow execution.
+      let priceStillValid = false;
+      if (current.currentBid !== undefined && current.currentAsk !== undefined) {
+        if (quote.referenceType === 'BEST_BID' && current.currentBid === parseFloat(quote.makerBoundary)) priceStillValid = true;
+        if (quote.referenceType === 'BEST_ASK' && current.currentAsk === parseFloat(quote.makerBoundary)) priceStillValid = true;
+      }
+      if (!priceStillValid) throw new Error('Quote is stale');
+    }
     return quote;
   }
 }
@@ -120,48 +130,99 @@ export class OrderLifecycleService {
       .run(id, JSON.stringify({ orderId: id, from, to, source }), Date.now());
   }
   private transition(id: string, to: string, source: string): void {
-    const old = this.get(id); if (!old) throw new Error('Local order not found');
-    this.db.prepare('UPDATE orders SET status=?,remoteState=?,rowVersion=rowVersion+1,updatedAt=? WHERE id=?').run(to, to, Date.now(), id);
-    this.event(id, old.status, to, source);
+    this.db.transaction(() => {
+      const old = this.get(id); if (!old) throw new Error('Local order not found');
+      this.db.prepare('UPDATE orders SET status=?,remoteState=?,rowVersion=rowVersion+1,updatedAt=? WHERE id=?').run(to, to, Date.now(), id);
+      this.event(id, old.status, to, source);
+    })();
   }
   reserve(intent: OrderIntent, quote: ExecutableQuote, dollars: number, shares: number): string {
     const existing = this.db.prepare('SELECT id FROM orders WHERE clientRequestId=?').get(intent.requestId) as { id: string } | undefined;
     if (existing) return existing.id;
     const id = crypto.randomUUID(), now = Date.now();
-    this.db.transaction(() => {
-      this.db.prepare(`INSERT INTO orders (id,clientRequestId,conditionId,tokenId,outcome,side,dollarSpend,size,price,
-        filledShares,remainingShares,fees,status,remoteState,executionMode,orderType,requestedPrice,submittedPrice,
-        requestedShares,reconciliationRequired,rowVersion,createdAt,updatedAt)
-        VALUES (?,?,?,?,?,?,?,?,?,'0',?,'0','PENDING','LOCAL_RESERVED',?,?,?,?,?,0,1,?,?)`)
-        .run(id, intent.requestId, intent.conditionId, intent.tokenId, intent.outcome, intent.side, decimal(dollars),
-          decimal(shares), quote.submittedPrice, decimal(shares), intent.executionMode, intent.orderType,
-          quote.displayedPrice, quote.submittedPrice, decimal(shares), now, now);
-      const isBuy = intent.side === 'BUY';
-      this.db.prepare(`INSERT INTO reservations (id,requestId,orderId,assetType,assetId,amount,state,expiresAt,createdAt,updatedAt)
-        VALUES (?,?,?,?,?,?,'RESERVED',?,?,?)`).run(crypto.randomUUID(), intent.requestId, id,
-          isBuy ? 'COLLATERAL' : 'SHARES', isBuy ? 'USDC' : intent.tokenId, decimal(isBuy ? dollars : shares),
-          quote.expiresAt + 60000, now, now);
-      this.event(id, null, 'PENDING', 'LOCAL', { quoteId: quote.quoteId });
-    })(); return id;
+    try {
+      this.db.transaction(() => {
+        this.db.prepare(`INSERT INTO orders (id,clientRequestId,conditionId,tokenId,outcome,side,dollarSpend,size,price,
+          filledShares,remainingShares,fees,status,remoteState,executionMode,orderType,requestedPrice,submittedPrice,
+          requestedShares,reconciliationRequired,rowVersion,createdAt,updatedAt)
+          VALUES (?,?,?,?,?,?,?,?,?,'0',?,'0','PENDING','LOCAL_RESERVED',?,?,?,?,?,0,1,?,?)`)
+          .run(id, intent.requestId, intent.conditionId, intent.tokenId, intent.outcome, intent.side, decimal(dollars),
+            decimal(shares), quote.submittedPrice, decimal(shares), intent.executionMode, intent.orderType,
+            quote.displayedPrice, quote.submittedPrice, decimal(shares), now, now);
+        const isBuy = intent.side === 'BUY';
+        this.db.prepare(`INSERT INTO reservations (id,requestId,orderId,assetType,assetId,amount,state,expiresAt,createdAt,updatedAt)
+          VALUES (?,?,?,?,?,?,'RESERVED',?,?,?)`).run(crypto.randomUUID(), intent.requestId, id,
+            isBuy ? 'COLLATERAL' : 'SHARES', isBuy ? 'USDC' : intent.tokenId, decimal(isBuy ? dollars : shares),
+            quote.expiresAt + 60000, now, now);
+        this.event(id, null, 'PENDING', 'LOCAL', { quoteId: quote.quoteId });
+      })(); 
+      return id;
+    } catch (error: any) {
+      if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+        const found = this.db.prepare('SELECT id FROM orders WHERE clientRequestId=?').get(intent.requestId) as { id: string } | undefined;
+        if (found) return found.id;
+      }
+      throw error;
+    }
   }
   submitting(id: string): void { this.transition(id, 'SUBMITTING', 'LOCAL'); }
   accepted(id: string, remote: any): any {
     const remoteId = String(remote.remoteOrderId || remote.id || '');
     if (!remoteId) throw new Error('Exchange response omitted the order ID');
-    this.db.transaction(() => {
-      this.db.prepare(`UPDATE orders SET remoteOrderId=?,status=?,remoteState=?,submittedPrice=COALESCE(?,submittedPrice),
-        size=COALESCE(?,size),filledShares=COALESCE(?,filledShares),remainingShares=COALESCE(?,remainingShares),
-        averageFillPrice=COALESCE(?,averageFillPrice),fees=COALESCE(?,fees),submissionResult='ACCEPTED',
-        reconciliationRequired=0,rowVersion=rowVersion+1,updatedAt=? WHERE id=?`)
-        .run(remoteId, remote.status || 'ACCEPTED', remote.remoteState || remote.state || remote.status || 'ACCEPTED',
-          remote.price ?? null, remote.size ?? null, remote.filledShares ?? null, remote.remainingShares ?? remote.size ?? null,
-          remote.averageFillPrice ?? null, remote.fees ?? null, Date.now(), id);
+
+    const now = Date.now();
+    const updateOrderState = (targetId: string, ghost?: any) => {
+      const status = remote.status || ghost?.status || 'ACCEPTED';
+      const remoteState = remote.remoteState || remote.state || ghost?.remoteState || status;
+      const filledShares = remote.filledShares ?? ghost?.filledShares ?? null;
+      const remainingShares = remote.remainingShares ?? remote.size ?? ghost?.remainingShares ?? null;
+      const averageFillPrice = remote.averageFillPrice ?? ghost?.averageFillPrice ?? null;
+      const fees = remote.fees ?? ghost?.fees ?? null;
+      const price = remote.price ?? null;
+      const size = remote.size ?? null;
+
+      this.db.prepare(`UPDATE orders SET 
+        remoteOrderId=?, status=?, remoteState=?, 
+        submittedPrice=COALESCE(?, submittedPrice), size=COALESCE(?, size),
+        filledShares=COALESCE(?, filledShares), remainingShares=COALESCE(?, remainingShares),
+        averageFillPrice=COALESCE(?, averageFillPrice), fees=COALESCE(?, fees),
+        submissionResult='ACCEPTED', reconciliationRequired=0, rowVersion=rowVersion+1, updatedAt=? 
+        WHERE id=?`)
+        .run(remoteId, status, remoteState, price, size, filledShares, remainingShares, averageFillPrice, fees, now, targetId);
+
       const terminal = ['FILLED', 'CANCELLED', 'CANCELED', 'REJECTED', 'EXPIRED']
-        .includes(String(remote.status || remote.remoteState || remote.state || '').toUpperCase());
-      this.db.prepare('UPDATE reservations SET state=?,updatedAt=? WHERE orderId=?')
-        .run(terminal ? 'RELEASED' : 'ACTIVE', Date.now(), id);
-      this.event(id, 'SUBMITTING', remote.status || 'ACCEPTED', 'EXCHANGE', remote);
-    })(); return this.get(id);
+        .includes(String(status).toUpperCase());
+      this.db.prepare('UPDATE reservations SET state=?, updatedAt=? WHERE orderId=?')
+        .run(terminal ? 'RELEASED' : 'ACTIVE', now, targetId);
+    };
+
+    try {
+      this.db.transaction(() => {
+        updateOrderState(id);
+        this.event(id, 'SUBMITTING', remote.status || 'ACCEPTED', 'EXCHANGE', remote);
+      })();
+    } catch (error: any) {
+      if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+        this.db.transaction(() => {
+          const ghost = this.db.prepare('SELECT * FROM orders WHERE remoteOrderId=? AND id!=?').get(remoteId, id) as any;
+          if (ghost) {
+            this.db.prepare('UPDATE fills SET orderId=? WHERE orderId=?').run(id, ghost.id);
+            this.db.prepare('UPDATE remote_trades SET orderId=? WHERE orderId=?').run(id, ghost.id);
+            this.db.prepare('UPDATE order_events SET orderId=? WHERE orderId=?').run(id, ghost.id);
+            this.db.prepare('DELETE FROM reservations WHERE orderId=?').run(ghost.id);
+            this.db.prepare('DELETE FROM orders WHERE id=?').run(ghost.id);
+
+            updateOrderState(id, ghost);
+            this.event(id, 'SUBMITTING', remote.status || ghost.status || 'ACCEPTED', 'EXCHANGE_MERGE', remote);
+          } else {
+            throw error;
+          }
+        })();
+      } else {
+        throw error;
+      }
+    }
+    return this.get(id);
   }
   rejected(id: string, error: Error): any { return this.finishFailure(id, error, false); }
   ambiguous(id: string, error: Error): any { return this.finishFailure(id, error, true); }

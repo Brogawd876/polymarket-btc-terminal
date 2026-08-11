@@ -292,6 +292,10 @@ function armLive(durationMs: number = 300000) {
   liveArmedState = true;
   try {
     const db = getDb();
+    if (activeTradingSessionId) {
+      db.prepare('UPDATE trading_sessions SET endedAt=?,endingBalance=? WHERE id=? AND endedAt IS NULL')
+        .run(Date.now(), String(lastAccountState?.collateralBalance ?? ''), activeTradingSessionId);
+    }
     activeTradingSessionId = crypto.randomUUID();
     db.prepare(`INSERT INTO trading_sessions (id,startedAt,startingBalance) VALUES (?,?,?)`)
       .run(activeTradingSessionId, Date.now(), String(lastAccountState?.collateralBalance ?? ''));
@@ -816,6 +820,8 @@ export async function registerRoutes(app: FastifyInstance) {
           const market = await adapter.getMarketState(currentMarket.conditionId);
           const revision = Number(market?.revision || market?.lastUpdated || 0);
           const bookVersion = Number((intent.outcome === 'UP' ? market?.upBook?.version : market?.downBook?.version) || revision);
+          const currentBid = parseFloat(intent.outcome === 'UP' ? market?.upBid || '0' : market?.downBid || '0');
+          const currentAsk = parseFloat(intent.outcome === 'UP' ? market?.upAsk || '0' : market?.downAsk || '0');
           const prior = db.prepare('SELECT status,response,createdAt FROM idempotency WHERE requestId=?').get(intent.requestId) as any;
           if (prior?.response) { connection.socket.send(prior.response); return; }
           if (prior) {
@@ -843,7 +849,7 @@ export async function registerRoutes(app: FastifyInstance) {
           db.prepare("INSERT INTO idempotency (requestId,status,createdAt,updatedAt) VALUES (?,'RESERVED',?,?)")
             .run(intent.requestId, Date.now(), Date.now());
           try {
-            const quote = executionService!.quotes.consume(intent.quoteId, intent, { marketRevision: revision, bookVersion });
+            const quote = executionService!.quotes.consume(intent.quoteId, intent, { marketRevision: revision, bookVersion, currentBid, currentAsk });
             const requestedShares = intent.side === 'BUY'
               ? parseFloat(intent.dollarSpend || '0') / parseFloat(quote.submittedPrice)
               : parseFloat(intent.shares || '0');
@@ -1008,8 +1014,10 @@ export async function registerRoutes(app: FastifyInstance) {
             if (success) {
               executionService!.lifecycle.confirmCancelled(localOrder.id);
             } else {
-              db.prepare(`UPDATE orders SET status='RECONCILING',remoteState='CANCEL_UNKNOWN',reconciliationRequired=1,updatedAt=? WHERE id=?`)
-                .run(Date.now(), localOrder.id);
+              db.transaction(() => {
+                db.prepare(`UPDATE orders SET status='RECONCILING',remoteState='CANCEL_UNKNOWN',reconciliationRequired=1,updatedAt=? WHERE id=?`)
+                  .run(Date.now(), localOrder.id);
+              })();
               disarmLive('AMBIGUOUS_CANCELLATION');
             }
             const storedOrder = normalizeOrderRow(db.prepare(`SELECT * FROM orders WHERE id = ?`).get(localOrder.id));
@@ -1019,9 +1027,11 @@ export async function registerRoutes(app: FastifyInstance) {
           } catch (e: any) {
             const localOrder = db.prepare('SELECT id FROM orders WHERE id=? OR remoteOrderId=?').get(orderId, orderId) as any;
             if (localOrder) {
-              db.prepare(`UPDATE orders SET status='RECONCILING',remoteState='CANCEL_UNKNOWN',reconciliationRequired=1,errorMessage=?,updatedAt=? WHERE id=?`)
-                .run(e.message, Date.now(), localOrder.id);
-              db.prepare("UPDATE reservations SET state='RECONCILING',updatedAt=? WHERE orderId=?").run(Date.now(), localOrder.id);
+              db.transaction(() => {
+                db.prepare(`UPDATE orders SET status='RECONCILING',remoteState='CANCEL_UNKNOWN',reconciliationRequired=1,errorMessage=?,updatedAt=? WHERE id=?`)
+                  .run(e.message, Date.now(), localOrder.id);
+                db.prepare("UPDATE reservations SET state='RECONCILING',updatedAt=? WHERE orderId=?").run(Date.now(), localOrder.id);
+              })();
             }
             disarmLive('AMBIGUOUS_CANCELLATION');
             connection.socket.send(JSON.stringify({ type: 'ERROR', protocolVersion: PROTOCOL_VERSION, error: e.message, id: payload.id }));
@@ -1048,12 +1058,12 @@ export async function registerRoutes(app: FastifyInstance) {
               }
             })();
             if (result.unresolvedOrderIds.length === 0) {
-              connection.socket.send(JSON.stringify({ type: 'PROTOCOL_ERROR', protocolVersion: PROTOCOL_VERSION, id: payload.id,
-                payload: { code: 'CANCEL_ALL_CONFIRMED', message: `${result.confirmedOrderIds.length} remote order(s) were confirmed cancelled` } }));
+              connection.socket.send(JSON.stringify({ type: 'COMMAND_ACCEPTED', protocolVersion: PROTOCOL_VERSION, id: payload.id,
+                payload: { message: `${result.confirmedOrderIds.length} remote order(s) were confirmed cancelled` } }));
             } else {
               disarmLive('CANCEL_ALL_RECONCILIATION');
-              connection.socket.send(JSON.stringify({ type: 'PROTOCOL_ERROR', protocolVersion: PROTOCOL_VERSION, id: payload.id,
-                payload: { code: 'CANCEL_RECONCILING', message: `${result.unresolvedOrderIds.length} targeted cancellation(s) require reconciliation` } }));
+              connection.socket.send(JSON.stringify({ type: 'COMMAND_ACCEPTED', protocolVersion: PROTOCOL_VERSION, id: payload.id,
+                payload: { message: `${result.unresolvedOrderIds.length} targeted cancellation(s) require reconciliation` } }));
             }
           } catch (e: any) {
             disarmLive('AMBIGUOUS_CANCEL_ALL');

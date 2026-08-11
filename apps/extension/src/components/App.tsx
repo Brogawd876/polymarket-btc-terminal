@@ -37,6 +37,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
       if (event.key === 'Escape' && terminal.readiness?.liveArmed) terminal.sendMessage({ type: 'DISARM_LIVE' });
     };
     window.addEventListener('keydown', onKeyDown);
@@ -48,7 +49,7 @@ const App: React.FC = () => {
   }, []);
 
   const openOrders = useMemo(
-    () => terminal.orders.filter(order => !['CANCELLED', 'FILLED', 'REJECTED', 'EXPIRED'].includes(order.status)),
+    () => terminal.orders.filter(order => !['CANCELLED', 'CANCELED', 'FILLED', 'REJECTED', 'EXPIRED'].includes(order.status)),
     [terminal.orders],
   );
   const collapsed = preferences.panelMode === 'collapsed';
@@ -112,6 +113,7 @@ const App: React.FC = () => {
             lastResponseId={terminal.lastResponseId}
             lastResponseType={terminal.lastResponseType}
             clearBackendError={terminal.clearLastError}
+            connected={terminal.connected}
           />
         )}
         {preferences.activeTab === 'orders' && <OrdersTab orders={terminal.orders} sendMessage={terminal.sendMessage} />}

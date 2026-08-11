@@ -4,7 +4,6 @@ import { createClientCommand, parseServerEvent, protocolVersion, type ClientComm
 export default defineBackground(() => {
   let ws: WebSocket | null = null;
   let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
-  let pingInterval: ReturnType<typeof setInterval> | null = null;
   let authenticated = false;
   let protocolAccepted = false;
   let token = '';
@@ -15,7 +14,10 @@ export default defineBackground(() => {
 
   const broadcast = (message: unknown) => {
     for (const port of ports) {
-      try { port.postMessage(message); }
+      try { 
+        port.postMessage(message);
+        const _err = chrome.runtime.lastError; 
+      }
       catch { ports.delete(port); }
     }
   };
@@ -61,16 +63,18 @@ export default defineBackground(() => {
   };
 
   const stopKeepAlive = () => {
-    if (pingInterval) clearInterval(pingInterval);
-    pingInterval = null;
+    chrome.alarms.clear('keepAlive');
   };
 
   const startKeepAlive = () => {
-    stopKeepAlive();
-    pingInterval = setInterval(() => {
-      if (ws?.readyState === WebSocket.OPEN && authenticated && protocolAccepted) sendDirect({ type: 'PING' });
-    }, 20_000);
+    chrome.alarms.create('keepAlive', { periodInMinutes: 0.33 }); // ~20 seconds
   };
+
+  chrome.alarms.onAlarm.addListener(alarm => {
+    if (alarm.name === 'keepAlive') {
+      if (ws?.readyState === WebSocket.OPEN && authenticated && protocolAccepted) sendDirect({ type: 'PING' });
+    }
+  });
 
   const scheduleReconnect = () => {
     if (reconnectTimeout) clearTimeout(reconnectTimeout);
@@ -125,6 +129,8 @@ export default defineBackground(() => {
       authenticated = false;
       protocolAccepted = false;
       token = '';
+      messageQueue.length = 0;
+      cachedSnapshot = null;
       stopKeepAlive();
       broadcast({ type: 'WS_STATUS', payload: false });
       scheduleReconnect();
@@ -150,12 +156,15 @@ export default defineBackground(() => {
   chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
     if (sender.id !== chrome.runtime.id || typeof message !== 'object' || message === null) return;
     const typed = message as { type?: unknown; payload?: unknown };
-    if (typed.type === 'SEND_WS') {
-      const requestId = sendWsMessage(typed.payload);
-      sendResponse(requestId ? { status: 'queued', requestId } : { status: 'rejected' });
-    } else if (typed.type === 'GET_WS_STATUS') {
-      sendResponse({ connected: authenticated && protocolAccepted, protocolVersion });
-    }
+    try {
+      if (typed.type === 'SEND_WS') {
+        const requestId = sendWsMessage(typed.payload);
+        sendResponse(requestId ? { status: 'queued', requestId } : { status: 'rejected' });
+      } else if (typed.type === 'GET_WS_STATUS') {
+        sendResponse({ connected: authenticated && protocolAccepted, protocolVersion });
+      }
+      const _err = chrome.runtime.lastError;
+    } catch {}
   });
 
   connect();

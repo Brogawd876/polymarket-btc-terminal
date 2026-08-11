@@ -666,6 +666,11 @@ export const WsEventSchema = z.discriminatedUnion('type', [
     payload: z.object({ message: z.string(), code: z.string().optional() }).optional(),
     error: z.string().optional(),
   }).merge(BaseMessageSchema),
+
+  z.object({
+    type: z.literal('COMMAND_ACCEPTED'),
+    payload: z.object({ message: z.string() }).optional(),
+  }).merge(BaseMessageSchema),
 ]);
 export type WsEvent = z.infer<typeof WsEventSchema>;
 
