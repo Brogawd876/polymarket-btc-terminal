@@ -38,7 +38,9 @@ const PageAnchorSchema = z.object({
 
 let liveArmedState = false;
 let armTimeout: NodeJS.Timeout | null = null;
-let snapshotRevision = 0;
+// Start each process above any prior in-memory revision so connected extension
+// tabs can replace a cached snapshot immediately after a backend restart.
+let snapshotRevision = Date.now();
 let executionService: ExecutionService | null = null;
 let lastAccountState: any = null;
 let lastAccountStateAt = 0;
@@ -72,6 +74,29 @@ function getPanelOrders(db: any): any[] {
     ORDER BY createdAt DESC
     LIMIT 100
   `).all(Date.now() - PANEL_ORDER_RECENCY_MS) as any[]).map(normalizeOrderRow);
+}
+
+function getPanelPresets(db: any): any[] {
+  return (db.prepare('SELECT * FROM presets').all() as any[]).flatMap(row => {
+    try {
+      return [{ id: row.id, name: row.name, ...JSON.parse(row.config) }];
+    } catch {
+      return [];
+    }
+  });
+}
+
+function getPanelSettings(db: any): Record<string, unknown> {
+  const settings: Record<string, unknown> = {};
+  const rows = db.prepare('SELECT key, value FROM settings').all() as { key: string; value: string }[];
+  for (const row of rows) {
+    try {
+      settings[row.key] = JSON.parse(row.value);
+    } catch {
+      settings[row.key] = row.value;
+    }
+  }
+  return settings;
 }
 
 function persistPlacedOrder(db: any, values: {
@@ -547,6 +572,8 @@ export async function registerRoutes(app: FastifyInstance) {
           const operationalState = determineOperationalState(readiness, activeMarket);
           const positions = await getPanelPositions(db, activeMarket);
           const orders = getPanelOrders(db);
+          const presets = getPanelPresets(db);
+          const settings = getPanelSettings(db);
           const balance = adapter ? await adapter.getBalance() : 0;
           const account = adapter ? await adapter.getAccountState() : undefined;
           if (account) { lastAccountState = account; lastAccountStateAt = Date.now(); }
@@ -565,6 +592,9 @@ export async function registerRoutes(app: FastifyInstance) {
               reference: getRtdsMetrics(),
               positions,
               orders,
+              presets,
+              settings,
+              realizedPnl: 0,
               balance,
               account,
               markets: updateMarkets,
@@ -691,8 +721,8 @@ export async function registerRoutes(app: FastifyInstance) {
           const account = adapter ? await adapter.getAccountState() : undefined;
           if (account) { lastAccountState = account; lastAccountStateAt = Date.now(); }
           
-          const presetsRows = db.prepare('SELECT * FROM presets').all() as any[];
-          const presets = presetsRows.map(r => ({ id: r.id, name: r.name, ...JSON.parse(r.config) }));
+          const presets = getPanelPresets(db);
+          const settings = getPanelSettings(db);
 
           const anchor = refreshedMarket ? getMarketAnchor(refreshedMarket.conditionId) : undefined;
 
@@ -715,7 +745,7 @@ export async function registerRoutes(app: FastifyInstance) {
               balance,
               realizedPnl: 0,
               presets,
-              settings: {}
+              settings
             }
           }));
           return;

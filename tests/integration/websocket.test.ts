@@ -3,7 +3,7 @@ import WebSocket from 'ws';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import fastifyWebsocket from '@fastify/websocket';
-import { closeDb, setupDb } from '../../apps/server/src/db/index';
+import { closeDb, getDb, setupDb } from '../../apps/server/src/db/index';
 import { registerRoutes } from '../../apps/server/src/routes/index';
 import { getLocalAuthToken } from '../../apps/server/src/index';
 import { resetConfigForTests } from '../../apps/server/src/config';
@@ -121,6 +121,10 @@ describe('Fastify WebSocket Route Integration', () => {
   });
 
   it('receives SNAPSHOT on SNAPSHOT_REQUEST', async () => {
+    getDb().prepare('INSERT INTO presets (id, name, config) VALUES (?, ?, ?)')
+      .run('snapshot-preset', 'Snapshot preset', JSON.stringify({ side: 'BUY', value: -0.01 }));
+    getDb().prepare('INSERT INTO settings (key, value) VALUES (?, ?)')
+      .run('buySizesUsd', JSON.stringify([3, 5]));
     let ws: WebSocket;
     const snapshot = await new Promise<any>((resolve) => {
       const timer = setTimeout(() => { ws.close(); resolve(null); }, 4000);
@@ -139,6 +143,8 @@ describe('Fastify WebSocket Route Integration', () => {
     expect(snapshot).toBeDefined();
     expect(snapshot.operationalState).toBeDefined();
     expect(snapshot.readiness).toBeDefined();
+    expect(snapshot.presets).toContainEqual(expect.objectContaining({ id: 'snapshot-preset', side: 'BUY' }));
+    expect(snapshot.settings).toMatchObject({ buySizesUsd: [3, 5] });
   });
 
   it('responds to authenticated PING with a valid PONG event', async () => {
