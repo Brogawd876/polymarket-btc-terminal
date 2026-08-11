@@ -26,6 +26,13 @@ logs/*.log
 apps/server/temp_build/
 apps/server/dist/
 apps/extension/dist/
+chrome-tmp/
+metamask/
+metamask.zip
+
+# Local diagnostic probes may contain account credentials
+test-ws*.js
+apps/server/test-ws*.js
 
 # OS
 .DS_Store
@@ -35,3 +42,5 @@ Thumbs.db
 apps/server/data/*.db*
 apps/server/data/*.db-shm
 apps/server/data/*.db-wal
+apps/server/data/backups/
+runtime/
