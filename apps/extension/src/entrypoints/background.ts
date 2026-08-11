@@ -1,156 +1,174 @@
 import { defineBackground } from 'wxt/sandbox';
-import { WsEventSchema } from '@polymarket-btc/shared';
+import { createClientCommand, parseServerEvent, protocolVersion, type ClientCommand } from '../protocol';
 
 export default defineBackground(() => {
   let ws: WebSocket | null = null;
-  let reconnectTimeout: NodeJS.Timeout;
+  let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   let pingInterval: ReturnType<typeof setInterval> | null = null;
-  let isAuthenticated = false;
-
-  let currentToken = '';
-  let snapshotState: any = null;
-  let lastMarketSubscription: any = null;
-
-  function startKeepAlive() {
-    if (pingInterval) clearInterval(pingInterval);
-    pingInterval = setInterval(() => {
-      if (ws && ws.readyState === WebSocket.OPEN && isAuthenticated) {
-        ws.send(JSON.stringify({ type: 'PING' }));
-      }
-    }, 20000);
-  }
-
-  function stopKeepAlive() {
-    if (pingInterval) clearInterval(pingInterval);
-    pingInterval = null;
-  }
-
-  const messageQueue: any[] = [];
+  let authenticated = false;
+  let protocolAccepted = false;
+  let token = '';
+  let cachedSnapshot: unknown = null;
+  let lastMarketSubscription: ClientCommand | null = null;
+  const messageQueue: ClientCommand[] = [];
   const ports = new Set<chrome.runtime.Port>();
 
-  chrome.runtime.onConnect.addListener((port) => {
-    if (port.name === 'polybtc-ws') {
-      ports.add(port);
-      port.onDisconnect.addListener(() => {
-        ports.delete(port);
-      });
-
-      port.postMessage({ type: 'WS_STATUS', payload: isAuthenticated });
-      if (isAuthenticated && snapshotState) {
-        port.postMessage({ type: 'WS_EVENT', payload: { type: 'SNAPSHOT', payload: snapshotState } });
-      }
-
-      port.onMessage.addListener((message) => {
-        if (message.type === 'SEND_WS' && message.payload) {
-          sendWsMessage(message.payload);
-        }
-      });
-    }
-  });
-
-  const broadcast = (message: any) => {
+  const broadcast = (message: unknown) => {
     for (const port of ports) {
-      try {
-        port.postMessage(message);
-      } catch (e) {
-        ports.delete(port);
-      }
+      try { port.postMessage(message); }
+      catch { ports.delete(port); }
     }
   };
 
-  const sendWsMessage = (payload: any) => {
-    const payloadWithId = { ...payload, id: payload.id || crypto.randomUUID() };
-    if (payload.type === 'SUBSCRIBE_MARKET' || payload.type === 'SELECT_MARKET') {
-      lastMarketSubscription = payloadWithId;
-    }
-    if (ws && ws.readyState === WebSocket.OPEN && isAuthenticated) {
-      ws.send(JSON.stringify(payloadWithId));
-    } else {
-      messageQueue.push(payloadWithId);
-    }
+  const reportProtocolError = (message: string) => {
+    console.error(`PolyBTC protocol: ${message}`);
+    broadcast({ type: 'PROTOCOL_ERROR', payload: { message } });
   };
 
-  const fetchToken = async () => {
-    try {
-      const res = await fetch('http://127.0.0.1:3001/api/v1/token');
-      const data = await res.json();
-      return data.token;
-    } catch (e) {
+  const setConnectionStatus = () => {
+    const ready = authenticated && protocolAccepted;
+    broadcast({ type: 'WS_STATUS', payload: ready });
+    if (ready && cachedSnapshot) broadcast({ type: 'WS_EVENT', payload: cachedSnapshot });
+  };
+
+  const sendDirect = (input: unknown): boolean => {
+    const parsed = createClientCommand(input);
+    if (!parsed.success) {
+      reportProtocolError(parsed.error);
+      return false;
+    }
+    ws?.send(JSON.stringify(parsed.data));
+    return true;
+  };
+
+  const flushQueue = () => {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !authenticated || !protocolAccepted) return;
+    while (messageQueue.length > 0) ws.send(JSON.stringify(messageQueue.shift()));
+  };
+
+  const sendWsMessage = (input: unknown): string | null => {
+    const parsed = createClientCommand(input);
+    if (!parsed.success) {
+      reportProtocolError(parsed.error);
       return null;
     }
+    const command = parsed.data;
+    if (command.type === 'SUBSCRIBE_MARKET' || command.type === 'SELECT_MARKET') lastMarketSubscription = command;
+    if (ws?.readyState === WebSocket.OPEN && authenticated && protocolAccepted) ws.send(JSON.stringify(command));
+    else if (messageQueue.length < 100) messageQueue.push(command);
+    else reportProtocolError('Command queue is full; command was not queued.');
+    return command.id;
+  };
+
+  const stopKeepAlive = () => {
+    if (pingInterval) clearInterval(pingInterval);
+    pingInterval = null;
+  };
+
+  const startKeepAlive = () => {
+    stopKeepAlive();
+    pingInterval = setInterval(() => {
+      if (ws?.readyState === WebSocket.OPEN && authenticated && protocolAccepted) sendDirect({ type: 'PING' });
+    }, 20_000);
+  };
+
+  const fetchToken = async (): Promise<string | null> => {
+    try {
+      const response = await fetch('http://127.0.0.1:3001/api/v1/token', { cache: 'no-store' });
+      if (!response.ok) return null;
+      const data: unknown = await response.json();
+      return typeof data === 'object' && data !== null && typeof (data as { token?: unknown }).token === 'string'
+        ? (data as { token: string }).token : null;
+    } catch { return null; }
+  };
+
+  const scheduleReconnect = () => {
+    if (reconnectTimeout) clearTimeout(reconnectTimeout);
+    reconnectTimeout = setTimeout(connect, 3000);
   };
 
   const connect = async () => {
-    const token = await fetchToken();
-    if (token) {
-      currentToken = token;
-    } else {
-      reconnectTimeout = setTimeout(connect, 3000);
-      return;
-    }
-
+    const nextToken = await fetchToken();
+    if (!nextToken) return scheduleReconnect();
+    token = nextToken;
     ws = new WebSocket('ws://127.0.0.1:3001/ws');
 
     ws.onopen = () => {
-      ws?.send(JSON.stringify({ type: 'AUTH', payload: { token: currentToken } }));
-      startKeepAlive();
+      authenticated = false;
+      protocolAccepted = false;
+      sendDirect({ type: 'HELLO', payload: { protocolVersion, extensionVersion: chrome.runtime.getManifest().version } });
+      sendDirect({ type: 'AUTH', payload: { token } });
     };
 
-    ws.onmessage = (event) => {
-      try {
-        const parsed = JSON.parse(event.data);
-        const validation = WsEventSchema.safeParse(parsed);
-        if (validation.success) {
-          const data = validation.data;
-          if (data.type === 'AUTH_OK') {
-            isAuthenticated = true;
-            broadcast({ type: 'WS_STATUS', payload: true });
-            if (lastMarketSubscription) {
-              ws?.send(JSON.stringify({ ...lastMarketSubscription, id: crypto.randomUUID() }));
-            }
-            ws?.send(JSON.stringify({ type: 'SNAPSHOT_REQUEST' }));
-          } else if (data.type === 'AUTH_ERROR') {
-            isAuthenticated = false;
-            currentToken = ''; 
-            snapshotState = null;
-            ws?.close();
-          } else if (data.type === 'SNAPSHOT') {
-            snapshotState = data.payload;
-            broadcast({ type: 'WS_EVENT', payload: data });
-            while(messageQueue.length > 0) {
-              ws?.send(JSON.stringify(messageQueue.shift()));
-            }
-          } else {
-            broadcast({ type: 'WS_EVENT', payload: data });
-          }
-        } else {
-          broadcast({ type: 'WS_EVENT', payload: parsed });
-        }
-      } catch (e) {
-        console.error('Failed to parse WS message', e);
+    ws.onmessage = event => {
+      const parsed = parseServerEvent(event.data);
+      if (!parsed.success) return reportProtocolError(parsed.error);
+      const serverEvent = parsed.data.event;
+      if (serverEvent.type === 'HELLO_ACK') {
+        protocolAccepted = true;
+        setConnectionStatus();
+        flushQueue();
+        return;
       }
+      if (serverEvent.type === 'AUTH_OK') {
+        authenticated = true;
+        startKeepAlive();
+        setConnectionStatus();
+        if (lastMarketSubscription) sendWsMessage({ ...lastMarketSubscription, id: crypto.randomUUID() });
+        sendWsMessage({ type: 'SNAPSHOT_REQUEST' });
+        flushQueue();
+        return;
+      }
+      if (serverEvent.type === 'AUTH_ERROR' || serverEvent.type === 'PROTOCOL_ERROR') {
+        reportProtocolError(serverEvent.payload.message);
+        token = '';
+        ws?.close();
+        return;
+      }
+      if (!authenticated || !protocolAccepted) return reportProtocolError('Ignored backend data received before authentication completed.');
+      const normalizedEvent = parsed.data.revision !== null && 'payload' in serverEvent && typeof serverEvent.payload === 'object' && serverEvent.payload !== null
+        ? { ...serverEvent, payload: { ...serverEvent.payload, revision: parsed.data.revision } }
+        : serverEvent;
+      if (serverEvent.type === 'TERMINAL_SNAPSHOT' || serverEvent.type === 'SNAPSHOT') cachedSnapshot = normalizedEvent;
+      broadcast({ type: 'WS_EVENT', payload: normalizedEvent });
     };
 
     ws.onclose = () => {
-      isAuthenticated = false;
-      currentToken = '';
-      snapshotState = null;
+      authenticated = false;
+      protocolAccepted = false;
+      token = '';
       stopKeepAlive();
       broadcast({ type: 'WS_STATUS', payload: false });
-      clearTimeout(reconnectTimeout);
-      reconnectTimeout = setTimeout(connect, 3000);
+      scheduleReconnect();
     };
+    ws.onerror = () => ws?.close();
   };
 
-  connect();
+  chrome.runtime.onConnect.addListener(port => {
+    if (port.name !== 'polybtc-ws') return;
+    ports.add(port);
+    port.onDisconnect.addListener(() => ports.delete(port));
+    port.postMessage({ type: 'WS_STATUS', payload: authenticated && protocolAccepted });
+    if (authenticated && protocolAccepted && cachedSnapshot) port.postMessage({ type: 'WS_EVENT', payload: cachedSnapshot });
+    port.onMessage.addListener((message: unknown) => {
+      if (typeof message !== 'object' || message === null || (message as { type?: unknown }).type !== 'SEND_WS') {
+        reportProtocolError('Rejected invalid extension port message.');
+        return;
+      }
+      sendWsMessage((message as { payload?: unknown }).payload);
+    });
+  });
 
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (!sender.id || sender.id !== chrome.runtime.id) return;
-    if (message.type === 'SEND_WS' && message.payload) {
-      sendWsMessage(message.payload);
-      sendResponse({ status: 'queued' });
-    } else if (message.type === 'GET_WS_STATUS') {
-      sendResponse({ connected: isAuthenticated });
+  chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
+    if (sender.id !== chrome.runtime.id || typeof message !== 'object' || message === null) return;
+    const typed = message as { type?: unknown; payload?: unknown };
+    if (typed.type === 'SEND_WS') {
+      const requestId = sendWsMessage(typed.payload);
+      sendResponse(requestId ? { status: 'queued', requestId } : { status: 'rejected' });
+    } else if (typed.type === 'GET_WS_STATUS') {
+      sendResponse({ connected: authenticated && protocolAccepted, protocolVersion });
     }
   });
+
+  connect();
 });

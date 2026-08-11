@@ -10,7 +10,14 @@ export default defineConfig({
     description: '5-Minute BTC execution terminal for Polymarket',
     version: '1.0.0',
     permissions: ['storage'],
-    host_permissions: ['*://*.polymarket.com/*', '*://polymarket.com/*', 'http://localhost/*', 'ws://localhost/*']
+    host_permissions: [
+      '*://*.polymarket.com/*',
+      '*://polymarket.com/*',
+      'http://localhost/*',
+      'ws://localhost/*',
+      'http://127.0.0.1/*',
+      'ws://127.0.0.1/*',
+    ]
   },
   vite: () => ({
     plugins: [react()],

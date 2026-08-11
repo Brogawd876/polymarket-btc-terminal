@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import type { 
   MarketState, 
   Side, 
@@ -6,26 +6,34 @@ import type {
   PresetConfig, 
   LiveReadiness, 
   OperationalState, 
-  Position, 
-  Outcome
+  Position,
+  Outcome,
+  ExecutableQuote,
 } from '@polymarket-btc/shared';
 import { AlertTriangle, Play, Square, Zap } from 'lucide-react';
-
-type ExecutionMode = 'MAKER' | 'ONE_TAP';
+import { RequestGate } from '../requestGate';
+import type { ExecutionMode, PageFollowPreference } from '../uiPreferences';
 
 interface Props {
   operationalState: OperationalState;
   readiness: LiveReadiness | null;
   marketInfo: MarketState | null;
   discoveredMarkets?: MarketState[];
-  sendMessage: (msg: any) => void;
+  sendMessage: (msg: unknown) => string | null;
   orders?: Order[];
   positions?: Position[];
   presets?: PresetConfig[];
+  quotes?: ExecutableQuote[];
   rtdsMetrics?: any;
   balance?: number;
   pageHref?: string;
+  pageFollow: PageFollowPreference;
+  executionMode: ExecutionMode;
+  setExecutionMode: (mode: ExecutionMode) => void;
   backendError?: string;
+  lastResult?: string;
+  lastResponseId?: string | null;
+  lastResponseType?: string | null;
   clearBackendError?: () => void;
 }
 
@@ -52,20 +60,28 @@ const TradingPanel: React.FC<Props> = ({
   orders = [], 
   positions = [],
   presets = DEFAULT_PRESETS, 
+  quotes = [],
   rtdsMetrics, 
   balance = 0,
   pageHref = '',
+  pageFollow,
+  executionMode,
+  setExecutionMode,
   backendError = '',
+  lastResult = 'No command result yet',
+  lastResponseId = null,
+  lastResponseType = null,
   clearBackendError
 }) => {
   const [buyUsdSpend, setBuyUsdSpend] = useState<string>('25');
   const [sellShares, setSellShares] = useState<string>('');
   const [activeOutcome, setActiveOutcome] = useState<Outcome>('UP');
-  const [executionMode, setExecutionMode] = useState<ExecutionMode>('MAKER');
   const [slippageBps, setSlippageBps] = useState<number>(100);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string>('');
   const [countdown, setCountdown] = useState<string>('');
+  const requestGate = useRef(new RequestGate());
+  const activeOrderRequestId = useRef<string | null>(null);
   const activePresets = presets.length > 0 ? presets : DEFAULT_PRESETS;
 
   const activeTokenId = marketInfo 
@@ -97,8 +113,12 @@ const TradingPanel: React.FC<Props> = ({
   }, [marketInfo]);
 
   useEffect(() => {
+    if (!activeOrderRequestId.current || lastResponseId !== activeOrderRequestId.current) return;
+    if (!['ORDER_RESULT', 'ERROR'].includes(lastResponseType || '')) return;
+    requestGate.current.complete(activeOrderRequestId.current);
+    activeOrderRequestId.current = null;
     setIsSubmitting(false);
-  }, [orders]);
+  }, [lastResponseId, lastResponseType]);
 
   useEffect(() => {
     if (maxSpendCents <= 0) return;
@@ -109,8 +129,18 @@ const TradingPanel: React.FC<Props> = ({
   }, [buyUsdSpend, maxBuySpend, maxSpendCents]);
 
   useEffect(() => {
-    if (backendError) setIsSubmitting(false);
-  }, [backendError]);
+    if (!marketInfo?.conditionId) return;
+    const request = () => sendMessage({ type: 'REQUEST_QUOTES', payload: {
+      conditionId: marketInfo.conditionId,
+      outcome: activeOutcome,
+      requestedDollars: buyUsdSpend,
+      requestedShares: sellShares || String(availableShares),
+      slippageBps,
+    } });
+    request();
+    const interval = setInterval(request, 1000);
+    return () => clearInterval(interval);
+  }, [marketInfo?.conditionId, activeOutcome, buyUsdSpend, sellShares, availableShares, slippageBps, sendMessage]);
 
   const formatMarketTime = (timestamp?: number) => {
     if (!timestamp) return '';
@@ -141,25 +171,44 @@ const TradingPanel: React.FC<Props> = ({
     sendMessage({ type: 'DISARM_LIVE' });
   };
 
-  const handlePlaceOrder = (side: Side, capturedPrice: string, capturedSize: string, capturedUsd?: string) => {
-    if (!activeTokenId) return;
+  const submitOrder = (quote: ExecutableQuote, side: Side, dollarSpend?: string, shares?: string) => {
+    const requestId = crypto.randomUUID();
+    if (!requestGate.current.begin(requestId)) return;
+    activeOrderRequestId.current = requestId;
     setError('');
     clearBackendError?.();
     setIsSubmitting(true);
-    sendMessage({
-      type: 'PLACE_ORDER',
-      id: crypto.randomUUID(),
+    const acceptedId = sendMessage({
+      type: 'PLACE_ORDER_INTENT',
+      id: requestId,
       payload: {
-        tokenId: activeTokenId,
-        outcome: activeOutcome,
+        requestId,
+        conditionId: quote.conditionId,
+        tokenId: quote.tokenId,
+        outcome: quote.outcome,
         side,
-        dollarSpend: capturedUsd,
-        size: capturedSize,
-        price: capturedPrice,
-        executionMode: 'MAKER',
-        orderType: 'GTC'
-      }
+        executionMode: quote.executionMode,
+        orderType: quote.executionMode === 'IMMEDIATE' ? 'FAK' : 'GTC',
+        quoteId: quote.quoteId,
+        marketRevision: quote.marketRevision,
+        dollarSpend: side === 'BUY' ? dollarSpend : undefined,
+        shares: side === 'SELL' ? shares : undefined,
+        slippageBps: quote.executionMode === 'IMMEDIATE' ? slippageBps : undefined,
+        postOnly: quote.executionMode === 'MAKER',
+      },
     });
+    if (!acceptedId) {
+      requestGate.current.complete(requestId);
+      activeOrderRequestId.current = null;
+      setIsSubmitting(false);
+    }
+  };
+
+  const handlePlaceOrder = (presetId: string, side: Side, capturedSize: string, capturedUsd?: string) => {
+    const quote = quotes.find(item => item.presetId === presetId && item.side === side && item.outcome === activeOutcome
+      && item.executionMode === 'MAKER' && item.expiresAt > Date.now());
+    if (!quote) { setError('Quote expired; wait for the next price update.'); return; }
+    submitOrder(quote, side, capturedUsd, capturedSize);
   };
 
   const getActiveQuote = () => {
@@ -181,77 +230,17 @@ const TradingPanel: React.FC<Props> = ({
   const formatHeldShares = (value: number) => floorToDecimals(value, 4);
 
   const handleOneTapOrder = (side: Side) => {
-    const { bid, ask, mid } = getActiveQuote();
-    const referencePrice = side === 'BUY' ? (ask || mid) : (bid || mid);
-    const capturedSize = side === 'BUY'
-      ? (referencePrice > 0 ? (buySpendNum / referencePrice).toFixed(4) : '0')
-      : (sellShares || defaultSellShares);
+    const quote = quotes.find(item => item.side === side && item.outcome === activeOutcome
+      && item.executionMode === 'IMMEDIATE' && item.expiresAt > Date.now());
+    const capturedSize = side === 'SELL' ? (sellShares || defaultSellShares) : undefined;
     const capturedUsd = side === 'BUY' ? buyUsdSpend : undefined;
-
-    if (!activeTokenId || referencePrice <= 0) return;
-    setError('');
-    clearBackendError?.();
-    setIsSubmitting(true);
-    sendMessage({
-      type: 'PLACE_ORDER',
-      id: crypto.randomUUID(),
-      payload: {
-        tokenId: activeTokenId,
-        outcome: activeOutcome,
-        side,
-        dollarSpend: capturedUsd,
-        size: capturedSize,
-        price: referencePrice.toFixed(2),
-        executionMode: 'ONE_TAP',
-        orderType: 'FAK',
-        slippageBps,
-      }
-    });
+    if (!quote) { setError('Quote expired; wait for the next price update.'); return; }
+    submitOrder(quote, side, capturedUsd, capturedSize);
   };
 
-  const calculatePresetPrice = (preset: PresetConfig): string | null => {
-    if (!marketInfo) return null;
-    const isUp = activeOutcome === 'UP';
-    const bidStr = isUp ? (marketInfo.upBid || marketInfo.yesBid) : (marketInfo.downBid || marketInfo.noBid);
-    const askStr = isUp ? (marketInfo.upAsk || marketInfo.yesAsk) : (marketInfo.downAsk || marketInfo.noAsk);
-    const priceStr = isUp ? (marketInfo.upPrice || marketInfo.yesPrice) : (marketInfo.downPrice || marketInfo.noPrice);
-
-    let refPrice = parseFloat(priceStr || '0.50');
-    if (preset.reference === 'BEST_BID' && bidStr) refPrice = parseFloat(bidStr);
-    if (preset.reference === 'BEST_ASK' && askStr) refPrice = parseFloat(askStr);
-    if (preset.reference === 'MIDPOINT') {
-      const b = parseFloat(bidStr || priceStr || '0.50');
-      const a = parseFloat(askStr || priceStr || '0.50');
-      refPrice = (b + a) / 2;
-    }
-
-    if (refPrice <= 0) return null;
-
-    let targetPrice = refPrice;
-    if (preset.mode === 'CENT_OFFSET') {
-      targetPrice = refPrice + preset.value;
-    } else if (preset.mode === 'PERCENT_OFFSET') {
-      targetPrice = refPrice * (1 + (preset.value / 100));
-    } else if (preset.mode === 'ABSOLUTE_PRICE') {
-      targetPrice = preset.value;
-    }
-
-    const ask = parseFloat(askStr || '0.99');
-    const bid = parseFloat(bidStr || '0.01');
-
-    if (preset.side === 'BUY') {
-      const maxMakerBuy = Math.max(0.01, ask - 0.01);
-      if (targetPrice > maxMakerBuy) targetPrice = maxMakerBuy;
-    } else {
-      const minMakerSell = Math.min(0.99, bid + 0.01);
-      if (targetPrice < minMakerSell) targetPrice = minMakerSell;
-    }
-
-    targetPrice = Math.round(targetPrice * 100) / 100;
-    if (targetPrice < 0.01 || targetPrice > 0.99) return null;
-
-    return targetPrice.toFixed(2);
-  };
+  const calculatePresetPrice = (preset: PresetConfig): string | null =>
+    quotes.find(item => item.presetId === preset.id && item.side === preset.side && item.outcome === activeOutcome
+      && item.executionMode === 'MAKER' && item.expiresAt > Date.now())?.displayedPrice || null;
 
   const isExecutionBlocked: boolean = !readiness || (readiness.blockingReasons && readiness.blockingReasons.length > 0) || !readiness.liveArmed;
   const activeQuote = getActiveQuote();
@@ -259,6 +248,8 @@ const TradingPanel: React.FC<Props> = ({
   const oneTapSellShares = parseFloat(sellShares || defaultSellShares) || 0;
   const oneTapBuyValid = hasEnoughBalance && oneTapBuyShares > 0 && (minimumOrderSize <= 0 || oneTapBuyShares >= minimumOrderSize);
   const oneTapSellValid = oneTapSellShares > 0 && oneTapSellShares <= availableShares && (minimumOrderSize <= 0 || oneTapSellShares >= minimumOrderSize);
+  const activeOrders = orders.filter(order => !['CANCELLED', 'FILLED', 'REJECTED', 'EXPIRED'].includes(order.status));
+  const handleCancelAll = () => sendMessage({ type: 'CANCEL_ALL', payload: marketInfo?.conditionId ? { conditionId: marketInfo.conditionId } : undefined });
 
   return (
     <div className="flex flex-col gap-3 font-sans text-xs">
@@ -304,7 +295,7 @@ const TradingPanel: React.FC<Props> = ({
           </div>
         )}
 
-        {pageMarketMismatch && (
+        {pageMarketMismatch && pageFollow === 'PROMPT' && (
           <div className="bg-yellow-950/80 border border-yellow-700 p-1.5 rounded text-[10px] text-yellow-200 font-mono flex items-center justify-between gap-2">
             <div className="flex items-start gap-1">
               <AlertTriangle size={10} className="shrink-0 mt-0.5" />
@@ -319,6 +310,13 @@ const TradingPanel: React.FC<Props> = ({
             </button>
           </div>
         )}
+      </div>
+
+      <div className="bg-gray-800 px-2 py-1.5 rounded border border-gray-700 grid grid-cols-[auto_auto_1fr_auto] items-center gap-2 text-[10px] font-mono">
+        <span className="text-gray-400">MARKET <strong className="text-white">{marketInfo?.type || 'NONE'}</strong></span>
+        <span className="text-gray-400">OPEN <strong className="text-white">{activeOrders.length}</strong></span>
+        <span className="text-gray-400 truncate" title={lastResult}>LAST <strong className="text-white">{lastResult}</strong></span>
+        <button onClick={handleCancelAll} disabled={activeOrders.length === 0} className="bg-red-900 hover:bg-red-800 disabled:opacity-40 px-2 py-1 rounded font-bold text-white" title="Cancel all open orders">CANCEL ALL</button>
       </div>
 
       {/* Discovered Markets Selector */}
@@ -414,13 +412,13 @@ const TradingPanel: React.FC<Props> = ({
           Maker
         </button>
         <button
-          onClick={() => setExecutionMode('ONE_TAP')}
+          onClick={() => setExecutionMode('IMMEDIATE')}
           className={`py-1.5 rounded text-[11px] font-bold uppercase flex items-center justify-center gap-1 ${
-            executionMode === 'ONE_TAP' ? 'bg-yellow-600 text-gray-950' : 'text-gray-400 hover:bg-gray-700'
+            executionMode === 'IMMEDIATE' ? 'bg-yellow-600 text-gray-950' : 'text-gray-400 hover:bg-gray-700'
           }`}
           title="Use a FAK market order with slippage protection"
         >
-          <Zap size={12} /> One Tap
+          <Zap size={12} /> Immediate <span className="text-[9px]">FAK</span>
         </button>
       </div>
 
@@ -501,7 +499,7 @@ const TradingPanel: React.FC<Props> = ({
             return (
               <button
                 key={preset.id}
-                onPointerDown={() => price && handlePlaceOrder('BUY', price, shares, buyUsdSpend)}
+                onClick={() => price && handlePlaceOrder(preset.id, 'BUY', shares, buyUsdSpend)}
                 disabled={isExecutionBlocked || !price || isSubmitting || !hasEnoughBalance || !meetsMinimumSize}
                 className="bg-green-700 hover:bg-green-600 disabled:opacity-40 py-2 rounded text-center font-mono font-bold text-white border border-green-500/50 shadow flex flex-col items-center justify-center"
                 title={`${preset.name} - Est Shares: ${shares}${!meetsMinimumSize ? `; minimum ${minimumOrderSize} shares` : ''}`}
@@ -559,7 +557,7 @@ const TradingPanel: React.FC<Props> = ({
             return (
               <button
                 key={preset.id}
-                onPointerDown={() => price && sellSizeValid && handlePlaceOrder('SELL', price, sharesToSell)}
+                onClick={() => price && sellSizeValid && handlePlaceOrder(preset.id, 'SELL', sharesToSell)}
                 disabled={isExecutionBlocked || !price || !sellSizeValid || isSubmitting}
                 className="bg-red-700 hover:bg-red-600 disabled:opacity-40 py-2 rounded text-center font-mono font-bold text-white border border-red-500/50 shadow flex flex-col items-center justify-center"
                 title={`${preset.name} - Shares: ${sharesToSell}${sharesToSellNum > availableShares ? '; exceeds held shares' : ''}${minimumOrderSize > 0 && sharesToSellNum < minimumOrderSize ? `; minimum ${minimumOrderSize} shares` : ''}`}
@@ -572,12 +570,12 @@ const TradingPanel: React.FC<Props> = ({
         </div>}
       </div>
 
-      {executionMode === 'ONE_TAP' && (
+      {executionMode === 'IMMEDIATE' && (
         <div className="bg-yellow-950/30 p-2.5 rounded border border-yellow-700/70 flex flex-col gap-2">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-1.5 text-yellow-300 font-bold uppercase text-[11px]">
               <Zap size={12} />
-              One Tap FAK
+              Immediate FAK
             </div>
             <div className="flex items-center gap-1 text-[10px] font-mono text-gray-300">
               <span>Slip</span>
@@ -608,7 +606,7 @@ const TradingPanel: React.FC<Props> = ({
           </div>
           <div className="grid grid-cols-2 gap-1.5">
             <button
-              onPointerDown={() => handleOneTapOrder('BUY')}
+              onClick={() => handleOneTapOrder('BUY')}
               disabled={isExecutionBlocked || isSubmitting || !oneTapBuyValid || activeQuote.ask <= 0}
               className="bg-green-700 hover:bg-green-600 disabled:opacity-40 py-2.5 rounded text-center font-mono font-bold text-white border border-green-500/60 shadow flex flex-col items-center justify-center"
               title={`Market buy up to $${buyUsdSpend}; estimated ${oneTapBuyShares.toFixed(2)} shares`}
@@ -617,7 +615,7 @@ const TradingPanel: React.FC<Props> = ({
               <span className="text-[9px] text-green-200 font-normal">${buyUsdSpend} now</span>
             </button>
             <button
-              onPointerDown={() => handleOneTapOrder('SELL')}
+              onClick={() => handleOneTapOrder('SELL')}
               disabled={isExecutionBlocked || isSubmitting || !oneTapSellValid || activeQuote.bid <= 0}
               className="bg-red-700 hover:bg-red-600 disabled:opacity-40 py-2.5 rounded text-center font-mono font-bold text-white border border-red-500/60 shadow flex flex-col items-center justify-center"
               title={`Market sell ${oneTapSellShares.toFixed(4)} shares`}
