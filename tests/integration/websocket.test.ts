@@ -40,20 +40,20 @@ describe('Fastify WebSocket Route Integration', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  const command = (type: string, payload?: unknown) => ({ protocolVersion: 2, id: crypto.randomUUID(), type, ...(payload === undefined ? {} : { payload }) });
+  const command = (type: string, payload?: unknown) => ({ protocolVersion: 3, id: crypto.randomUUID(), type, ...(payload === undefined ? {} : { payload }) });
 
   const openAuthenticated = (onMessage: (ws: WebSocket, message: any) => void) => {
     const ws = new WebSocket(serverUrl, { headers: { Origin: origin } });
-    ws.on('open', () => ws.send(JSON.stringify(command('HELLO', { protocolVersion: 2, extensionVersion: 'test' }))));
+    ws.on('open', () => ws.send(JSON.stringify(command('HELLO', { protocolVersion: 3, extensionVersion: 'test' }))));
     ws.on('message', data => {
       const message = JSON.parse(data.toString());
-      if (message.type === 'HELLO_ACK') ws.send(JSON.stringify(command('AUTH', { token: getLocalAuthToken() })));
+      if (message.type === 'HELLO_ACK') ws.send(JSON.stringify(command('AUTH', { token: message.payload.pairingToken })));
       onMessage(ws, message);
     });
     return ws;
   };
 
-  it('authenticates with valid getLocalAuthToken and receives AUTH_OK', async () => {
+  it('authenticates with the origin-bound pairing token and receives AUTH_OK', async () => {
     let ws: WebSocket;
     const authOk = await new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => { ws.close(); resolve(false); }, 4000);
@@ -67,6 +67,57 @@ describe('Fastify WebSocket Route Integration', () => {
     });
     ws.close();
     expect(authOk).toBe(true);
+  });
+
+  it('does not expose the old HTTP token bootstrap endpoint', async () => {
+    const response = await app.inject({ method: 'GET', url: '/api/v1/token', headers: { origin } });
+    expect(response.statusCode).toBe(404);
+  });
+
+  it('rejects a WebSocket whose browser origin is not the configured extension', async () => {
+    const closeCode = await new Promise<number>((resolve) => {
+      const socket = new WebSocket(serverUrl, { headers: { Origin: 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } });
+      const timer = setTimeout(() => { socket.close(); resolve(0); }, 2000);
+      socket.on('close', code => { clearTimeout(timer); resolve(code); });
+      socket.on('error', () => undefined);
+    });
+    expect(closeCode).toBe(1008);
+  });
+
+  it('issues a per-session token instead of exposing the process HTTP bearer', async () => {
+    let ws: WebSocket;
+    const pairingToken = await new Promise<string>((resolve) => {
+      ws = new WebSocket(serverUrl, { headers: { Origin: origin } });
+      const timer = setTimeout(() => { ws.close(); resolve(''); }, 2000);
+      ws.on('open', () => ws.send(JSON.stringify(command('HELLO', { protocolVersion: 3, extensionVersion: 'test' }))));
+      ws.on('message', data => {
+        const message = JSON.parse(data.toString());
+        if (message.type === 'HELLO_ACK') {
+          clearTimeout(timer);
+          resolve(message.payload.pairingToken);
+        }
+      });
+    });
+    ws.close();
+    expect(pairingToken).toHaveLength(64);
+    expect(pairingToken).not.toBe(getLocalAuthToken());
+  });
+
+  it('rejects a second HELLO on the same WebSocket session', async () => {
+    const closeCode = await new Promise<number>((resolve) => {
+      const socket = new WebSocket(serverUrl, { headers: { Origin: origin } });
+      const timer = setTimeout(() => { socket.close(); resolve(0); }, 2000);
+      socket.on('open', () => socket.send(JSON.stringify(command('HELLO', { protocolVersion: 3, extensionVersion: 'test' }))));
+      socket.on('message', data => {
+        const message = JSON.parse(data.toString());
+        if (message.type === 'HELLO_ACK') {
+          socket.send(JSON.stringify(command('HELLO', { protocolVersion: 3, extensionVersion: 'test' })));
+        }
+      });
+      socket.on('close', code => { clearTimeout(timer); resolve(code); });
+      socket.on('error', () => undefined);
+    });
+    expect(closeCode).toBe(1008);
   });
 
   it('receives SNAPSHOT on SNAPSHOT_REQUEST', async () => {

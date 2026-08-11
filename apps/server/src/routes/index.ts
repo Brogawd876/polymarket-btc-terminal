@@ -1,4 +1,5 @@
 import { FastifyInstance } from 'fastify';
+import nodeCrypto from 'crypto';
 import { adapter, getLocalAuthToken } from '../index';
 import { getDb } from '../db/index';
 import { z } from 'zod';
@@ -415,13 +416,6 @@ export async function registerRoutes(app: FastifyInstance) {
     return { status: 'ok', timestamp: Date.now() };
   });
 
-  app.get('/api/v1/token', async (request, reply) => {
-    if (request.headers.origin !== getAllowedExtensionOrigin()) {
-      return reply.code(403).send({ error: 'Pairing is only available to the configured extension' });
-    }
-    return { token: getLocalAuthToken() };
-  });
-
   app.get('/api/v1/readiness', async () => {
     const currentMarket = await getAuthoritativeMarket(true);
     try { await refreshAccountState(); } catch {}
@@ -517,11 +511,12 @@ export async function registerRoutes(app: FastifyInstance) {
     let isAuthenticated = false;
     let helloAccepted = false;
     const sessionId = crypto.randomUUID();
+    let pairingToken: string | null = nodeCrypto.randomBytes(32).toString('hex');
     (connection.socket as any).sessionId = sessionId;
 
     const authTimeout = setTimeout(() => {
       if (!isAuthenticated) connection.socket.close();
-    }, 3000);
+    }, 5000);
     
     const intervalId = setInterval(async () => {
       if (!isAuthenticated) return;
@@ -595,12 +590,15 @@ export async function registerRoutes(app: FastifyInstance) {
         const payload = detailedCommand.data as any;
         const db = getDb();
         const globalDiscoveryService = (globalThis as any).discoveryService;
-        const currentMarket = await getAuthoritativeMarket(true);
         
         if (payload.type === 'HELLO') {
+          if (helloAccepted) {
+            connection.socket.close(1008, 'HELLO already accepted');
+            return;
+          }
           helloAccepted = true;
           connection.socket.send(JSON.stringify({ type: 'HELLO_ACK', protocolVersion: PROTOCOL_VERSION, id: payload.id,
-            payload: { protocolVersion: PROTOCOL_VERSION, serverVersion: '2.0.0', sessionId } }));
+            payload: { protocolVersion: PROTOCOL_VERSION, serverVersion: '3.0.0', sessionId, pairingToken } }));
           return;
         }
 
@@ -611,8 +609,11 @@ export async function registerRoutes(app: FastifyInstance) {
             connection.socket.close(1008, 'HELLO required');
             return;
           }
-          const expectedToken = getLocalAuthToken();
-          if (payload.payload && payload.payload.token === expectedToken) {
+          const suppliedToken = String(payload.payload?.token || '');
+          const tokenMatches = pairingToken !== null && suppliedToken.length === pairingToken.length
+            && nodeCrypto.timingSafeEqual(Buffer.from(suppliedToken), Buffer.from(pairingToken));
+          if (tokenMatches) {
+            pairingToken = null;
             isAuthenticated = true;
             (connection.socket as any).terminalAuthenticated = true;
             getDb().prepare(`INSERT INTO extension_sessions (id,origin,protocolVersion,authenticatedAt,lastSeenAt)
@@ -633,6 +634,7 @@ export async function registerRoutes(app: FastifyInstance) {
             id: payload.id, payload: { code: 'AUTH_REQUIRED', message: 'Authenticate before sending commands' } }));
           return;
         }
+        const currentMarket = await getAuthoritativeMarket(true);
         getDb().prepare('UPDATE extension_sessions SET lastSeenAt=? WHERE id=?').run(Date.now(), sessionId);
 
         if (payload.type === 'ARM_LIVE') {

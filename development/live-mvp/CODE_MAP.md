@@ -9,7 +9,7 @@
 ### 2. `apps/server` (`apps/server/src/`)
 - `index.ts`: Fastify app setup, HTTP & WebSocket listening on 3001, local auth token generation.
 - `db/index.ts`: SQLite database initialization, schema migrations (`orders`, `fills`, `positions`, `presets`, `idempotency`, `settings`, `anchors`).
-- `routes/index.ts`: REST endpoints (`/api/v1/health`, `/api/v1/token`, `/api/v1/presets`, `/api/v1/settings`, `/api/v1/readiness`) and `/ws` WebSocket route handling.
+- `routes/index.ts`: authenticated REST endpoints, public health/readiness diagnostics, and the origin-validated `/ws` pairing and command route.
 - `integrations/polymarket/`:
   - `discovery.ts`: Gamma API polling for BTC 5m markets, slug calculation, window timing, UP/DOWN token label mapping.
   - `rtds.ts`: Polymarket Chainlink RTDS WebSocket listener for live BTC/USD price and price-to-beat anchor validation.

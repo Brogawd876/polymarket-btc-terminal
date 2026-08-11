@@ -6,7 +6,7 @@ const marketEvent = (revision: number, marketId: string) => ({
   parsed: {
     revision,
     event: {
-      protocolVersion: 2,
+      protocolVersion: 3,
       type: 'MARKET_UPDATED',
       payload: {
         marketId,
@@ -43,7 +43,7 @@ describe('terminal reducer revisions', () => {
       parsed: {
         revision: 1,
         event: {
-          protocolVersion: 2,
+          protocolVersion: 3,
           type: 'ORDER_RESULT',
           id: 'order-request-7',
           payload: { result: 'ACCEPTED', requestId: 'order-request-7', orderId: 'local-7', remoteTradeIds: [] },

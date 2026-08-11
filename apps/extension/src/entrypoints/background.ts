@@ -72,32 +72,18 @@ export default defineBackground(() => {
     }, 20_000);
   };
 
-  const fetchToken = async (): Promise<string | null> => {
-    try {
-      const response = await fetch('http://127.0.0.1:3001/api/v1/token', { cache: 'no-store' });
-      if (!response.ok) return null;
-      const data: unknown = await response.json();
-      return typeof data === 'object' && data !== null && typeof (data as { token?: unknown }).token === 'string'
-        ? (data as { token: string }).token : null;
-    } catch { return null; }
-  };
-
   const scheduleReconnect = () => {
     if (reconnectTimeout) clearTimeout(reconnectTimeout);
     reconnectTimeout = setTimeout(connect, 3000);
   };
 
-  const connect = async () => {
-    const nextToken = await fetchToken();
-    if (!nextToken) return scheduleReconnect();
-    token = nextToken;
+  const connect = () => {
     ws = new WebSocket('ws://127.0.0.1:3001/ws');
 
     ws.onopen = () => {
       authenticated = false;
       protocolAccepted = false;
       sendDirect({ type: 'HELLO', payload: { protocolVersion, extensionVersion: chrome.runtime.getManifest().version } });
-      sendDirect({ type: 'AUTH', payload: { token } });
     };
 
     ws.onmessage = event => {
@@ -105,9 +91,10 @@ export default defineBackground(() => {
       if (!parsed.success) return reportProtocolError(parsed.error);
       const serverEvent = parsed.data.event;
       if (serverEvent.type === 'HELLO_ACK') {
+        token = serverEvent.payload.pairingToken;
         protocolAccepted = true;
+        sendDirect({ type: 'AUTH', payload: { token } });
         setConnectionStatus();
-        flushQueue();
         return;
       }
       if (serverEvent.type === 'AUTH_OK') {

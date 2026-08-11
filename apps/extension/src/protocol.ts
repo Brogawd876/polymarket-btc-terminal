@@ -1,8 +1,9 @@
 import {
+  PROTOCOL_VERSION,
   WsEventSchema,
 } from '@polymarket-btc/shared';
 
-export const protocolVersion = 2 as const;
+export const protocolVersion = PROTOCOL_VERSION;
 const CLIENT_COMMAND_TYPES = new Set([
   'HELLO', 'AUTH', 'SNAPSHOT_REQUEST', 'ARM_LIVE', 'DISARM_LIVE', 'SELECT_MARKET',
   'SUBSCRIBE_MARKET', 'PAGE_ANCHOR_UPDATE', 'REQUEST_QUOTES', 'PLACE_ORDER_INTENT',

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const PROTOCOL_VERSION = 2 as const;
+export const PROTOCOL_VERSION = 3 as const;
 
 export const ProtocolVersionSchema = z.literal(PROTOCOL_VERSION);
 
@@ -376,6 +376,7 @@ export const WsEventSchema = z.discriminatedUnion('type', [
       protocolVersion: ProtocolVersionSchema,
       serverVersion: z.string(),
       sessionId: z.string(),
+      pairingToken: z.string().min(32),
     }),
   }).merge(BaseMessageSchema),
 
