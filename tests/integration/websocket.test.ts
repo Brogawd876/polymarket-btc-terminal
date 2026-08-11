@@ -140,4 +140,22 @@ describe('Fastify WebSocket Route Integration', () => {
     expect(snapshot.operationalState).toBeDefined();
     expect(snapshot.readiness).toBeDefined();
   });
+
+  it('responds to authenticated PING with a valid PONG event', async () => {
+    let ws: WebSocket;
+    const pong = await new Promise<any>((resolve) => {
+      const timer = setTimeout(() => { ws.close(); resolve(null); }, 4000);
+      ws = openAuthenticated((socket, msg) => {
+        if (msg.type === 'AUTH_OK') socket.send(JSON.stringify(command('PING')));
+        if (msg.type === 'PONG') {
+          clearTimeout(timer);
+          resolve(msg);
+        }
+      });
+      ws.on('error', () => { clearTimeout(timer); resolve(null); });
+    });
+    ws.close();
+    expect(pong?.protocolVersion).toBe(3);
+    expect(typeof pong?.payload?.timestamp).toBe('number');
+  });
 });

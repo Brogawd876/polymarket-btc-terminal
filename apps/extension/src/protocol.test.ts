@@ -22,4 +22,9 @@ describe('extension protocol boundary', () => {
     const result = parseServerEvent(JSON.stringify({ protocolVersion, type: 'ERROR', payload: { message: 'rejected' } }));
     expect(result.success).toBe(true);
   });
+
+  it('accepts the versioned keepalive response', () => {
+    const result = parseServerEvent(JSON.stringify({ protocolVersion, type: 'PONG', payload: { timestamp: 123 } }));
+    expect(result.success).toBe(true);
+  });
 });

@@ -657,6 +657,11 @@ export const WsEventSchema = z.discriminatedUnion('type', [
   }).merge(BaseMessageSchema),
 
   z.object({
+    type: z.literal('PONG'),
+    payload: z.object({ timestamp: z.number() }),
+  }).merge(BaseMessageSchema),
+
+  z.object({
     type: z.literal('ERROR'),
     payload: z.object({ message: z.string(), code: z.string().optional() }).optional(),
     error: z.string().optional(),
@@ -706,6 +711,7 @@ export const ServerEventTypeSchema = z.enum([
   'FILL_UPDATED',
   'POSITION_UPDATED',
   'SETTINGS_UPDATED',
+  'PONG',
   'PROTOCOL_ERROR',
   'ERROR',
 ]);

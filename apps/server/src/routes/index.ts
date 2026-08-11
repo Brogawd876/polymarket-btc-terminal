@@ -1073,8 +1073,12 @@ export async function registerRoutes(app: FastifyInstance) {
           connection.socket.send(JSON.stringify({ type: 'SETTINGS_UPDATED', protocolVersion: PROTOCOL_VERSION, id: payload.id, payload: { presets: rows, revision: ++snapshotRevision } }));
         }
         else if (payload.type === 'PING') {
-          connection.socket.send(JSON.stringify({ type: 'HELLO_ACK', protocolVersion: PROTOCOL_VERSION, id: payload.id,
-            payload: { protocolVersion: PROTOCOL_VERSION, serverVersion: '2.0.0', sessionId: String((connection.socket as any).sessionId || '') } }));
+          connection.socket.send(JSON.stringify({
+            type: 'PONG',
+            protocolVersion: PROTOCOL_VERSION,
+            id: payload.id,
+            payload: { timestamp: Date.now() },
+          }));
         }
         else if (payload.type === 'RECONCILE') {
           const runId = crypto.randomUUID();

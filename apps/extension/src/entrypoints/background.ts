@@ -112,6 +112,7 @@ export default defineBackground(() => {
         ws?.close();
         return;
       }
+      if (serverEvent.type === 'PONG') return;
       if (!authenticated || !protocolAccepted) return reportProtocolError('Ignored backend data received before authentication completed.');
       const normalizedEvent = parsed.data.revision !== null && 'payload' in serverEvent && typeof serverEvent.payload === 'object' && serverEvent.payload !== null
         ? { ...serverEvent, payload: { ...serverEvent.payload, revision: parsed.data.revision } }
