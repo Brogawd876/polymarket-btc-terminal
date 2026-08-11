@@ -1,33 +1,29 @@
-# Final Verification Report
+# Superseded Repair Verification Record
 
-## 1. Overview
-This document represents the final verification and sign-off for the Polymarket BTC 5-Minute Execution Terminal. The project has undergone rigorous systematic review following the completion of all preceding phases. The primary goal of Phase 10 was to affirm complete operational compliance against the original requirements.
+## Status
 
-## 2. Workspace Script Audit
-All top-level workspace scripts have been verified:
-- `pnpm build`: Functions correctly, compiling both server and extension packages.
-- `pnpm lint`: Operational and checks all workspaces.
-- `pnpm typecheck`: Completes without missing scripts.
-- `pnpm test`: Subpackage test suites are executing.
-- `pnpm test:integration`: Validates integration tests cleanly.
-- `pnpm verify`: Now reliably strings together all validation steps.
+**SUPERSEDED - COMPLETE OPERATIONAL COMPLIANCE IS NOT AFFIRMED**
 
-## 3. Backend & DB Audit
-The backend environment is verified to be fully operational. 
-- **DB Scripts Fixed:** The previously missing `db:migrate`, `db:reset:test`, `public:diagnose`, `live:diagnose`, and `live:smoke` scripts were implemented and mapped in `apps/server/package.json`.
-- **Backend Startup:** The `ts-node-dev` startup routine correctly provisions the database (`better-sqlite3`) and resolves dependencies properly without module errors.
+The former report stated that all requirements were met. Later audits contradicted that conclusion and identified critical execution, persistence, market-data, security, UX, and operations defects. In particular, shallow mount tests and successful build commands were incorrectly treated as proof of real trading correctness.
 
-## 4. E2E & Extension Audit
-The end-to-end testing suite execution has been stabilized:
-- **E2E Tests (`extension-panel.test.ts`):** Modified to use `domcontentloaded` and intercept external requests, ensuring reliable injection and bypassing slow third-party timeouts during shadow DOM testing. The extension successfully mounts the `polymarket-btc-terminal` tag inside the target page.
+## What this report no longer claims
 
-## 5. Codebase Compliance Check
-The codebase structure conforms to the original execution engine constraints:
-- **No Fake Delays:** Audited the execution logic. `PaperTradingAdapter` correctly implements taker matching simulations without relying on fake temporal wait functions (e.g., hardcoded `setTimeout` mid-points). Wait logic correctly handles real connection closures.
-- **WebSocket Integration:** Validated that both the Polymarket CTF websocket and RTDS updates are robustly constructed.
-- **Engine Abstraction:** The abstraction between Paper and Live logic remains intact, ensuring a clean swap mechanism when interacting with production environments.
+This document does not assert that:
 
-## 6. Final Sign-Off
-All original requirements are demonstrably met. The backend operates robustly, the extension injects natively as a Shadow DOM overlay, and the terminal's scripts reliably maintain the database layer.
+- authenticated exchange events are parsed and reconciled correctly;
+- every accepted order is tracked exactly once;
+- unknown submission outcomes are safe to retry;
+- cancellation is remotely confirmed;
+- balances, reservations, fills, positions, fees, and P&L reconcile;
+- market, token, outcome, anchor, and displayed quote are bound at submission;
+- readiness reflects coherent CLOB and account health;
+- the local browser/backend security boundary is safe; or
+- the terminal is production-ready.
 
-**Conclusion:** Complete Operational Compliance affirmed.
+## Evidence policy
+
+Build, lint, typecheck, unit, integration, packaging, browser, and live-smoke evidence are distinct. A successful result in one category cannot promote another category to passed. Every result must be tied to a commit, exact command/procedure, dated artifact, environment, and limitations.
+
+The authoritative current record is `docs/VERIFICATION_REPORT.md`. The intended architecture is `docs/ARCHITECTURE.md`. Operator instructions are in `START HERE.txt`.
+
+This file remains only to make the withdrawn conclusion explicit and to prevent old links from silently presenting false release confidence.
