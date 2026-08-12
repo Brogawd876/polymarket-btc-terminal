@@ -36,6 +36,12 @@ function Get-ProcessStartTimeUtc($Process) {
     return ([Management.ManagementDateTimeConverter]::ToDateTime([string]$Process.CreationDate)).ToUniversalTime()
 }
 
+function Get-MetadataTimeUtc($Value) {
+    if (-not $Value) { return $null }
+    if ($Value -is [DateTime]) { return $Value.ToUniversalTime() }
+    return [DateTimeOffset]::Parse([string]$Value).UtcDateTime
+}
+
 function Test-Health {
     try {
         $health = Invoke-RestMethod -Uri $HealthUrl -TimeoutSec 2
@@ -52,7 +58,7 @@ function Test-OwnedListener($Listener, $Metadata) {
     if (-not $process) { return $false }
     if ($Metadata.processStartTimeUtc -and $process.CreationDate) {
         $actual = Get-ProcessStartTimeUtc $process
-        $expected = [DateTime]::Parse([string]$Metadata.processStartTimeUtc).ToUniversalTime()
+        $expected = Get-MetadataTimeUtc $Metadata.processStartTimeUtc
         if ([Math]::Abs(($actual - $expected).TotalSeconds) -gt 2) { return $false }
     }
     return $true

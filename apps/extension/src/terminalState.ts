@@ -124,7 +124,7 @@ export function terminalReducer(state: TerminalState, action: TerminalAction): T
       operationalState: 'OFFLINE',
       readiness: null,
       rtdsMetrics: { ...state.rtdsMetrics, connected: false, stale: true },
-      lastError: 'Backend connection lost. Reconnecting...',
+      lastError: '',
     };
   }
 

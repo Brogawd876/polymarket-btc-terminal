@@ -81,7 +81,22 @@ export default defineBackground(() => {
     reconnectTimeout = setTimeout(connect, 3000);
   };
 
-  const connect = () => {
+  const backendHealthy = async (): Promise<boolean> => {
+    try {
+      const response = await fetch('http://127.0.0.1:3001/api/v1/health', { cache: 'no-store' });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  };
+
+  const connect = async () => {
+    if (!(await backendHealthy())) {
+      broadcast({ type: 'WS_STATUS', payload: false });
+      scheduleReconnect();
+      return;
+    }
+
     ws = new WebSocket('ws://127.0.0.1:3001/ws');
 
     ws.onopen = () => {

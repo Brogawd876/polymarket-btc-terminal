@@ -94,6 +94,13 @@ describe('QuoteService executable quote binding', () => {
     expect(() => service.consume(expired.quoteId, makerIntent(expired.quoteId), { marketRevision: 7, bookVersion: 11 }))
       .toThrow(/not found|already used/i);
   });
+
+  it('uses BUY dollars for share estimates when requestedShares is zero', () => {
+    const service = new QuoteService();
+    const quote = service.create(quoteInput({ requestedDollars: 3, requestedShares: 0 }));
+    expect(Number(quote.estimatedShares)).toBeGreaterThan(0);
+    expect(Number(quote.estimatedDollars)).toBeGreaterThan(0);
+  });
 });
 
 describe('PresetEngine', () => {

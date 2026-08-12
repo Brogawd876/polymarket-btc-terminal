@@ -51,7 +51,9 @@ export class QuoteService {
       }
     }
     if (!(price > 0 && price < 1)) throw new Error('Quote is outside the valid price range');
-    const shares = v.requestedShares ?? ((v.requestedDollars || 0) / price);
+    const shares = v.requestedShares && v.requestedShares > 0
+      ? v.requestedShares
+      : ((v.requestedDollars || 0) / price);
     const quote: ExecutableQuote = {
       quoteId: crypto.randomUUID(), conditionId: v.conditionId, tokenId: v.tokenId, outcome: v.outcome,
       side: v.side, executionMode: v.executionMode,

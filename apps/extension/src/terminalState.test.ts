@@ -37,6 +37,12 @@ describe('terminal reducer revisions', () => {
     expect(offline.operationalState).toBe('OFFLINE');
   });
 
+  it('treats a disconnected backend as offline status, not a protocol error', () => {
+    const offline = terminalReducer(initialTerminalState, { type: 'CONNECTION', connected: false });
+    expect(offline.operationalState).toBe('OFFLINE');
+    expect(offline.lastError).toBe('');
+  });
+
   it('records the exact command response ID for keyed request completion', () => {
     const next = terminalReducer(initialTerminalState, {
       type: 'SERVER_EVENT',
