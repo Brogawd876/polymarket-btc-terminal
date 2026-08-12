@@ -21,6 +21,18 @@ function createLifecycleDb() {
       requestedShares TEXT, submissionResult TEXT, reconciliationRequired INTEGER DEFAULT 0,
       errorMessage TEXT, rowVersion INTEGER DEFAULT 0, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL
     );
+    CREATE UNIQUE INDEX idx_orders_remoteOrderId ON orders(remoteOrderId) WHERE remoteOrderId IS NOT NULL;
+    CREATE TABLE fills (
+      id TEXT PRIMARY KEY, orderId TEXT NOT NULL, tokenId TEXT NOT NULL,
+      conditionId TEXT, outcome TEXT, side TEXT NOT NULL, price TEXT NOT NULL,
+      size TEXT NOT NULL, fee TEXT NOT NULL, remoteEventId TEXT,
+      remoteTradeState TEXT, confirmed INTEGER DEFAULT 0, createdAt INTEGER NOT NULL
+    );
+    CREATE TABLE remote_trades (
+      tradeId TEXT PRIMARY KEY, orderId TEXT, tokenId TEXT NOT NULL,
+      conditionId TEXT, outcome TEXT, side TEXT NOT NULL, price TEXT NOT NULL,
+      size TEXT NOT NULL, fee TEXT, state TEXT NOT NULL, receiveTimestamp INTEGER NOT NULL
+    );
     CREATE TABLE reservations (
       id TEXT PRIMARY KEY, requestId TEXT NOT NULL, orderId TEXT, assetType TEXT NOT NULL,
       assetId TEXT NOT NULL, amount TEXT NOT NULL, state TEXT NOT NULL, expiresAt INTEGER,
@@ -100,6 +112,96 @@ describe('QuoteService executable quote binding', () => {
     const quote = service.create(quoteInput({ requestedDollars: 3, requestedShares: 0 }));
     expect(Number(quote.estimatedShares)).toBeGreaterThan(0);
     expect(Number(quote.estimatedDollars)).toBeGreaterThan(0);
+  });
+
+  it('allows a revised maker book when the captured price is still post-only', () => {
+    const service = new QuoteService();
+    const quote = service.create(quoteInput({ referencePrice: 0.43, makerBoundary: 0.44 }));
+    expect(service.consume(quote.quoteId, makerIntent(quote.quoteId), {
+      marketRevision: 8,
+      bookVersion: 12,
+      currentBid: 0.42,
+      currentAsk: 0.45,
+    })).toEqual(quote);
+  });
+
+  it('rejects a revised maker book when the captured price would cross', () => {
+    const service = new QuoteService();
+    const quote = service.create(quoteInput({ referencePrice: 0.43, makerBoundary: 0.44 }));
+    expect(() => service.consume(quote.quoteId, makerIntent(quote.quoteId), {
+      marketRevision: 8,
+      bookVersion: 12,
+      currentBid: 0.42,
+      currentAsk: 0.43,
+    })).toThrow(/stale/i);
+  });
+
+  it('allows a revised immediate BUY book inside the captured slippage limit', () => {
+    const service = new QuoteService();
+    const quote = service.create(quoteInput({ executionMode: 'IMMEDIATE', referencePrice: 0.51, makerBoundary: undefined }));
+    expect(service.consume(quote.quoteId, makerIntent(quote.quoteId, { executionMode: 'IMMEDIATE', orderType: 'FAK' }), {
+      marketRevision: 8,
+      bookVersion: 12,
+      currentBid: 0.49,
+      currentAsk: 0.51,
+    })).toEqual(quote);
+  });
+
+  it('rejects a revised immediate BUY book outside the captured slippage limit', () => {
+    const service = new QuoteService();
+    const quote = service.create(quoteInput({ executionMode: 'IMMEDIATE', referencePrice: 0.51, makerBoundary: undefined }));
+    expect(() => service.consume(quote.quoteId, makerIntent(quote.quoteId, { executionMode: 'IMMEDIATE', orderType: 'FAK' }), {
+      marketRevision: 8,
+      bookVersion: 12,
+      currentBid: 0.49,
+      currentAsk: 0.52,
+    })).toThrow(/stale/i);
+  });
+
+  it('rounds immediate BUY prices up so FAK can cross the ask within slippage', () => {
+    const service = new QuoteService();
+    const quote = service.create(quoteInput({ executionMode: 'IMMEDIATE', referencePrice: 0.715, makerBoundary: undefined }));
+    expect(quote.displayedPrice).toBe('0.72');
+    expect(quote.submittedPrice).toBe('0.72');
+  });
+
+  it('rounds immediate SELL prices down so FAK can cross the bid within slippage', () => {
+    const service = new QuoteService();
+    const quote = service.create(quoteInput({
+      side: 'SELL',
+      executionMode: 'IMMEDIATE',
+      referencePrice: 0.715,
+      makerBoundary: undefined,
+      requestedDollars: undefined,
+      requestedShares: 5,
+    }));
+    expect(quote.displayedPrice).toBe('0.71');
+    expect(quote.submittedPrice).toBe('0.71');
+  });
+
+  it('keeps immediate SELL quotes valid at the one-tick floor', () => {
+    const service = new QuoteService();
+    const quote = service.create(quoteInput({
+      side: 'SELL',
+      executionMode: 'IMMEDIATE',
+      referencePrice: 0.0099,
+      makerBoundary: undefined,
+      requestedDollars: undefined,
+      requestedShares: 5,
+    }));
+    expect(quote.displayedPrice).toBe('0.01');
+    expect(quote.submittedPrice).toBe('0.01');
+  });
+
+  it('keeps immediate BUY quotes valid at the one-tick ceiling', () => {
+    const service = new QuoteService();
+    const quote = service.create(quoteInput({
+      executionMode: 'IMMEDIATE',
+      referencePrice: 0.9999,
+      makerBoundary: undefined,
+    }));
+    expect(quote.displayedPrice).toBe('0.99');
+    expect(quote.submittedPrice).toBe('0.99');
   });
 });
 
@@ -185,5 +287,28 @@ describe('OrderLifecycleService ambiguity and cancellation', () => {
     lifecycle.submitting(id);
     lifecycle.accepted(id, { remoteOrderId: 'remote-filled', status: 'FILLED', filledShares: '6.97674419', remainingShares: '0' });
     expect(db.prepare('SELECT state FROM reservations WHERE orderId=?').get(id)).toMatchObject({ state: 'RELEASED' });
+  });
+
+  it('merges a remote ghost order into the local order when a fill arrives before acceptance', () => {
+    const id = lifecycle.reserve(makerIntent(quote.quoteId), quote, 3, 6.97674419);
+    lifecycle.submitting(id);
+    const now = Date.now();
+    db.prepare(`INSERT INTO orders (id,remoteOrderId,conditionId,tokenId,outcome,side,dollarSpend,size,price,filledShares,remainingShares,fees,status,remoteState,reconciliationRequired,createdAt,updatedAt)
+      VALUES ('remote-ghost','remote-filled','condition-current','token-up','UP','BUY','0','0','0.43','6.97674419','0','0','FILLED','MATCHED',0,?,?)`)
+      .run(now, now);
+    db.prepare(`INSERT INTO fills (id,orderId,tokenId,conditionId,outcome,side,price,size,fee,remoteEventId,remoteTradeState,confirmed,createdAt)
+      VALUES ('fill-1','remote-ghost','token-up','condition-current','UP','BUY','0.43','6.97674419','0','fill-1','CONFIRMED',1,?)`)
+      .run(now);
+    db.prepare(`INSERT INTO remote_trades (tradeId,orderId,tokenId,conditionId,outcome,side,price,size,fee,state,receiveTimestamp)
+      VALUES ('fill-1','remote-ghost','token-up','condition-current','UP','BUY','0.43','6.97674419','0','CONFIRMED',?)`)
+      .run(now);
+
+    const stored = lifecycle.accepted(id, { remoteOrderId: 'remote-filled', status: 'FILLED', filledShares: '6.97674419', remainingShares: '0' });
+    expect(stored.id).toBe(id);
+    expect(stored.remoteOrderId).toBe('remote-filled');
+    expect(stored.status).toBe('FILLED');
+    expect(db.prepare('SELECT id FROM orders WHERE id=?').get('remote-ghost')).toBeUndefined();
+    expect(db.prepare('SELECT orderId FROM fills WHERE id=?').get('fill-1')).toMatchObject({ orderId: id });
+    expect(db.prepare('SELECT orderId FROM remote_trades WHERE tradeId=?').get('fill-1')).toMatchObject({ orderId: id });
   });
 });

@@ -10,6 +10,7 @@ const ACTIVE_ORDERS = "'PENDING','SUBMITTING','ACCEPTED','OPEN','LIVE','PARTIALL
 const ACTIVE_RESERVATIONS = "'RESERVED','SUBMITTING','ACTIVE','RECONCILING'";
 const number = (value: unknown) => Number.isFinite(Number(value)) ? Number(value) : 0;
 const decimal = (value: number) => value.toFixed(8).replace(/\.?0+$/, '') || '0';
+const EPSILON = 1e-8;
 
 export class PresetEngine {
   calculateRaw(reference: number, mode: 'CENT_OFFSET' | 'PERCENT_OFFSET' | 'ABSOLUTE_PRICE', value: number): number {
@@ -31,6 +32,17 @@ export class QuoteService {
   private quotes = new Map<string, ExecutableQuote>();
   private presets = new PresetEngine();
 
+  private clampToValidTickRange(price: number, tick: number): number {
+    if (!(tick > 0)) throw new Error('A valid market tick is required');
+    return Math.max(tick, Math.min(1 - tick, price));
+  }
+
+  private roundImmediate(price: number, tick: number, side: Side): number {
+    if (!(tick > 0)) throw new Error('A valid market tick is required');
+    const units = price / tick;
+    return Number(((side === 'BUY' ? Math.ceil(units - 1e-9) : Math.floor(units + 1e-9)) * tick).toFixed(8));
+  }
+
   create(v: { conditionId: string; tokenId: string; outcome: 'UP' | 'DOWN'; side: Side;
     executionMode: 'MAKER' | 'IMMEDIATE'; referencePrice: number; tickSize: number;
     referenceType?: 'BEST_BID' | 'BEST_ASK' | 'MIDPOINT' | 'LAST_TRADE';
@@ -41,7 +53,13 @@ export class QuoteService {
       if (quote.expiresAt < now) this.quotes.delete(id);
     }
 
-    let price = this.presets.round(v.referencePrice, v.tickSize, v.side);
+    const validReference = v.executionMode === 'IMMEDIATE'
+      ? this.clampToValidTickRange(v.referencePrice, v.tickSize)
+      : v.referencePrice;
+
+    let price = v.executionMode === 'IMMEDIATE'
+      ? this.roundImmediate(validReference, v.tickSize, v.side)
+      : this.presets.round(v.referencePrice, v.tickSize, v.side);
     let clampResult: 'UNCHANGED' | 'CLAMPED' = 'UNCHANGED';
     if (v.executionMode === 'MAKER' && v.makerBoundary !== undefined) {
       const crosses = v.side === 'BUY' ? price >= v.makerBoundary : price <= v.makerBoundary;
@@ -76,15 +94,23 @@ export class QuoteService {
     if (quote.conditionId !== intent.conditionId || quote.tokenId !== intent.tokenId || quote.outcome !== intent.outcome ||
         quote.side !== intent.side || quote.executionMode !== intent.executionMode) throw new Error('Quote binding does not match the order intent');
     
-    // Check if quote is stale
     if (quote.marketRevision !== current.marketRevision || quote.bookVersion !== current.bookVersion) {
-      // Relaxed validation: if book version shifted, but the top-of-book price is still exactly what the quote expects, allow execution.
-      let priceStillValid = false;
-      if (current.currentBid !== undefined && current.currentAsk !== undefined) {
-        if (quote.referenceType === 'BEST_BID' && current.currentBid === parseFloat(quote.makerBoundary)) priceStillValid = true;
-        if (quote.referenceType === 'BEST_ASK' && current.currentAsk === parseFloat(quote.makerBoundary)) priceStillValid = true;
+      const submittedPrice = parseFloat(quote.submittedPrice);
+      const currentBid = Number(current.currentBid);
+      const currentAsk = Number(current.currentAsk);
+      if (!Number.isFinite(submittedPrice) || !Number.isFinite(currentBid) || !Number.isFinite(currentAsk) ||
+          currentBid <= 0 || currentAsk <= 0 || currentBid > currentAsk) {
+        throw new Error('Quote is stale');
       }
-      if (!priceStillValid) throw new Error('Quote is stale');
+
+      const stillValid = quote.executionMode === 'MAKER'
+        ? quote.side === 'BUY'
+          ? submittedPrice < currentAsk - EPSILON
+          : submittedPrice > currentBid + EPSILON
+        : quote.side === 'BUY'
+          ? currentAsk <= submittedPrice + EPSILON
+          : currentBid >= submittedPrice - EPSILON;
+      if (!stillValid) throw new Error('Quote is stale');
     }
     return quote;
   }
@@ -240,8 +266,15 @@ export class OrderLifecycleService {
   }
   markCancelPending(id: string): void { this.transition(id, 'CANCEL_PENDING', 'LOCAL'); }
   confirmCancelled(id: string): any {
-    this.db.transaction(() => { this.transition(id, 'CANCELLED', 'EXCHANGE');
-      this.db.prepare("UPDATE reservations SET state='RELEASED',updatedAt=? WHERE orderId=?").run(Date.now(), id); })();
+    this.db.transaction(() => {
+      const order = this.get(id);
+      const filled = parseFloat(order?.filledShares || '0');
+      // If it was partially filled before cancel, mark as FILLED (the fills are real money)
+      const finalStatus = filled > 0.000001 ? 'FILLED' : 'CANCELLED';
+      this.db.prepare(`UPDATE orders SET status=?,remoteState=?,reconciliationRequired=0,rowVersion=rowVersion+1,updatedAt=? WHERE id=?`).run(finalStatus, finalStatus, Date.now(), id);
+      this.db.prepare("UPDATE reservations SET state='RELEASED',updatedAt=? WHERE orderId=?").run(Date.now(), id);
+      this.event(id, order?.status || null, finalStatus, 'EXCHANGE');
+    })();
     return this.get(id);
   }
   get(id: string): any { return this.db.prepare('SELECT * FROM orders WHERE id=?').get(id); }

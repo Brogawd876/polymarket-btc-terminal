@@ -237,6 +237,18 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
       for (const order of restingOrders) {
         const remoteOrderId = order.remoteOrderId;
         if (!remoteOrderId) {
+          // Ghost orders created from WebSocket fills (id starts with 'remote_') may have fills recorded already.
+          // If they have accumulated fills, auto-resolve them as FILLED rather than leaving them stuck.
+          if (order.id.startsWith('remote_')) {
+            const fillCheck = db.prepare(`SELECT SUM(CAST(size AS REAL)) AS total FROM fills WHERE orderId = ? AND confirmed = 1`).get(order.id) as { total?: number } | undefined;
+            const totalFilled = Number(fillCheck?.total || 0);
+            if (totalFilled > 0) {
+              db.prepare(`UPDATE orders SET status='FILLED', remoteState='MATCHED', reconciliationRequired=0, filledShares=?, remainingShares='0', size=CASE WHEN CAST(size AS REAL)<=0 THEN ? ELSE size END, updatedAt=? WHERE id=?`)
+                .run(String(totalFilled), String(totalFilled), Date.now(), order.id);
+              this.releaseReservations(db, order.id, Date.now());
+              continue;
+            }
+          }
           this.markOrderUnknown(order.id, 'MISSING_REMOTE_ORDER_ID');
           continue;
         }
@@ -873,16 +885,21 @@ export class OfficialSdkTradingAdapter extends TradingAdapter {
         const aggregateNotional = Number(orderTotals?.notional || 0);
         const aggregateFees = Number(orderTotals?.fees || 0);
         const originalSize = Number(localOrder.size || '0');
+        // If originalSize is 0 (ghost order), treat any fill as FILLED rather than leaving in RECONCILING forever
         const aggregateStatus = originalSize <= 0
-          ? 'RECONCILING'
+          ? (aggregateFilled > 0 ? 'FILLED' : 'RECONCILING')
           : aggregateFilled + 0.000001 < originalSize
             ? 'PARTIALLY_FILLED'
             : 'FILLED';
         const averageFillPrice = aggregateFilled > 0 ? String(aggregateNotional / aggregateFilled) : price;
         const remoteState = aggregateStatus === 'RECONCILING' ? 'UNKNOWN' : aggregateStatus;
+        // For ghost orders that are now FILLED, set size from the fills
+        const resolvedSize = originalSize <= 0 && aggregateStatus === 'FILLED' ? String(aggregateFilled) : null;
 
-        db.prepare(`UPDATE orders SET filledShares = ?, remainingShares = ?, averageFillPrice = ?, fees = ?, status = ?, remoteState = ?, reconciliationRequired = ?, updatedAt = ?, rowVersion = rowVersion + 1 WHERE id = ?`)
-          .run(String(aggregateFilled), originalSize > 0 ? String(Math.max(0, originalSize - aggregateFilled)) : null, averageFillPrice, String(aggregateFees), aggregateStatus, remoteState, aggregateStatus === 'RECONCILING' ? 1 : 0, createdAt, localOrder.id);
+        db.prepare(`UPDATE orders SET filledShares = ?, remainingShares = ?, averageFillPrice = ?, fees = ?, status = ?, remoteState = ?, reconciliationRequired = ?, ${resolvedSize !== null ? 'size = ?,' : ''} updatedAt = ?, rowVersion = rowVersion + 1 WHERE id = ?`)
+          .run(...(resolvedSize !== null
+            ? [String(aggregateFilled), '0', averageFillPrice, String(aggregateFees), aggregateStatus, remoteState, aggregateStatus === 'RECONCILING' ? 1 : 0, resolvedSize, createdAt, localOrder.id]
+            : [String(aggregateFilled), originalSize > 0 ? String(Math.max(0, originalSize - aggregateFilled)) : null, averageFillPrice, String(aggregateFees), aggregateStatus, remoteState, aggregateStatus === 'RECONCILING' ? 1 : 0, createdAt, localOrder.id]));
         db.prepare(`INSERT OR IGNORE INTO order_events (orderId, fromState, toState, source, remoteEventId, payload, exchangeTimestamp, receiveTimestamp)
           VALUES (?, ?, ?, 'CONFIRMED_TRADE', ?, ?, ?, ?)`)
           .run(localOrder.id, localOrder.status, aggregateStatus, `fill:${remoteEventId}`, JSON.stringify(fill), createdAt, Date.now());
