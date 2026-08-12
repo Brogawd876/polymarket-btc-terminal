@@ -681,7 +681,7 @@ export async function registerRoutes(app: FastifyInstance) {
           const duration = payload.payload?.durationSeconds ? payload.payload.durationSeconds * 1000 : 300000;
           try { await refreshAccountState(); } catch {}
           const readinessBeforeArm = evaluateReadiness(currentMarket);
-          const blockersBeforeArm = readinessBeforeArm.blockingReasons.filter(reason => reason !== 'LIVE EXECUTION DISARMED');
+          const blockersBeforeArm = readinessBeforeArm.blockingReasons.filter((reason: string) => reason !== 'LIVE EXECUTION DISARMED');
           if (blockersBeforeArm.length > 0) {
             connection.socket.send(JSON.stringify({ type: 'READINESS_UPDATED', protocolVersion: PROTOCOL_VERSION, id: payload.id, payload: { ...readinessBeforeArm, revision: ++snapshotRevision } }));
             connection.socket.send(JSON.stringify({
