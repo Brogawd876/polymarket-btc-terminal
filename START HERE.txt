@@ -1,0 +1,41 @@
+POLYMARKET BTC TERMINAL - START HERE
+
+IMPORTANT STATUS
+This repository is under reliability repair. A successful build or green automated test does not mean the terminal is safe for unrestricted live trading. Keep execution disarmed unless you are performing an explicitly approved, capped verification.
+
+NORMAL STARTUP
+1. Double-click start.bat.
+2. Wait for the backend health message. If startup reports an error, stop and use STATUS.bat; do not arm the panel.
+3. Open the current BTC five-minute market in Chrome.
+4. Confirm the panel reports the same market window as the page and shows coherent UP and DOWN bid/ask prices.
+5. Confirm the state is LIVE_DISARMED. Arming is always a separate deliberate action.
+
+EXTENSION RELOAD
+Reload the extension after an extension build or whenever Chrome still shows an older panel:
+1. Open chrome://extensions.
+2. Find extension ID jkpghfeaioigocjjdfeeocfjilhjbdno.
+3. Click Reload.
+4. Refresh the Polymarket tab.
+
+Reloading the web page alone does not load a newly built extension. Restarting the backend alone does not reload the extension either.
+
+STOP AND STATUS
+- Double-click STATUS.bat to check backend status.
+- Double-click STOP.bat for a normal shutdown.
+- Do not close the terminal window or kill port 3001 as the normal shutdown method; doing so can interrupt database and order-state updates.
+- STOP.bat is expected to preserve open exchange orders unless a separately documented cancellation policy says otherwise. Confirm open orders on Polymarket after stopping.
+
+BEFORE ANY LIVE ACTION
+- Page market, terminal execution market, condition, token, and outcome must agree.
+- Price-to-beat must be validated for the current five-minute window.
+- Both order books must be fresh and valid; stale last-good prices are display-only.
+- Balance, allowance, user stream, reconciliation, and readiness must be healthy.
+- There must be no UNKNOWN, RECONCILING, or CANCEL_PENDING order requiring attention.
+- The displayed maker price must be the submitted price; a changed or expired quote must be rejected.
+- Available shares means holdings minus shares reserved by open sell orders.
+
+WHEN SOMETHING LOOKS WRONG
+Disarm first. Do not retry an order after a timeout or unclear response. Check Polymarket open orders and activity, then use the terminal diagnostics and logs to reconcile the result. Repeated clicks can create duplicate exposure when submission status is uncertain.
+
+EVIDENCE POLICY
+Only docs/VERIFICATION_REPORT.md records current verification evidence. Historical files named FINAL_ACCEPTANCE or FINAL_VERIFICATION_REPORT are retained as non-authoritative history. CI proves only the commands it ran at a named commit; it never proves live-order correctness or production readiness.

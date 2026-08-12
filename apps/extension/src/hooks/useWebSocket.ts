@@ -1,52 +1,69 @@
-import { useState, useEffect, useCallback } from 'react';
-import { 
-  WsEventSchema,
-  type WsEvent, 
-  type Order, 
-  type MarketState 
-} from '@polymarket-btc/shared';
+import { useCallback, useEffect, useReducer, useRef } from 'react';
+import { createClientCommand, parseServerEvent } from '../protocol';
+import { initialTerminalState, terminalReducer } from '../terminalState';
 
-export function useWebSocket(url: string) {
-  const [connected, setConnected] = useState(false);
-  const [marketInfo, setMarketInfo] = useState<MarketState | null>(null);
-  const [orders, setOrders] = useState<Order[]>([]);
-  const [rtdsPrice, setRtdsPrice] = useState<string | null>(null);
+export function useWebSocket(_url: string) {
+  const [state, dispatch] = useReducer(terminalReducer, initialTerminalState);
+  const contextAvailable = useRef(true);
 
   useEffect(() => {
     let port: chrome.runtime.Port;
-    try {
-      port = chrome.runtime.connect({ name: 'polybtc-ws' });
-    } catch (e) {
-      console.error('Failed to connect port:', e);
+    try { port = chrome.runtime.connect({ name: 'polybtc-ws' }); }
+    catch {
+      dispatch({ type: 'PROTOCOL_ERROR', message: 'Could not connect to the extension background service.' });
       return;
     }
 
-    port.onMessage.addListener((message: any) => {
-      console.log('useWebSocket received message via port:', message);
-      if (message.type === 'WS_STATUS') {
-        setConnected(message.payload);
-      } else if (message.type === 'DEBUG_ERROR') {
-        console.error('BACKGROUND SCRIPT VALIDATION FAILED:', message.payload);
-      } else if (message.type === 'WS_EVENT') {
-        const data = message.payload;
-        if (data.type === 'MARKET_UPDATE') setMarketInfo(data.payload);
-        if (data.type === 'RTDS_UPDATE') setRtdsPrice(data.payload.price);
-        if (data.type === 'ORDER_UPDATE') {
-          setOrders(prev => {
-            const exists = prev.find(o => o.id === data.payload.id);
-            if (exists) return prev.map(o => o.id === data.payload.id ? data.payload : o);
-            return [data.payload, ...prev];
-          });
-        }
+    port.onMessage.addListener((message: unknown) => {
+      if (typeof message !== 'object' || message === null) {
+        dispatch({ type: 'PROTOCOL_ERROR', message: 'Rejected invalid background message.' });
+        return;
+      }
+      const typed = message as { type?: unknown; payload?: unknown };
+      if (typed.type === 'WS_STATUS' && typeof typed.payload === 'boolean') {
+        dispatch({ type: 'CONNECTION', connected: typed.payload });
+      } else if (typed.type === 'PROTOCOL_ERROR' && typeof typed.payload === 'object' && typed.payload !== null) {
+        const text = (typed.payload as { message?: unknown }).message;
+        dispatch({ type: 'PROTOCOL_ERROR', message: typeof text === 'string' ? text : 'Protocol error.' });
+      } else if (typed.type === 'WS_EVENT') {
+        const parsed = parseServerEvent(typed.payload);
+        if (parsed.success) dispatch({ type: 'SERVER_EVENT', parsed: parsed.data });
+        else dispatch({ type: 'PROTOCOL_ERROR', message: parsed.error });
+      } else {
+        dispatch({ type: 'PROTOCOL_ERROR', message: 'Rejected unknown background message.' });
       }
     });
-
-    return () => port.disconnect();
+    return () => {
+      try { port.disconnect(); } catch {}
+    };
   }, []);
 
-  const sendMessage = useCallback((msg: any) => {
-    chrome.runtime.sendMessage({ type: 'SEND_WS', payload: msg })?.catch(() => {});
+  const sendMessage = useCallback((input: unknown): string | null => {
+    if (!contextAvailable.current) return null;
+    const parsed = createClientCommand(input);
+    if (!parsed.success) {
+      dispatch({ type: 'PROTOCOL_ERROR', message: parsed.error });
+      return null;
+    }
+    try {
+      chrome.runtime.sendMessage({ type: 'SEND_WS', payload: parsed.data })?.catch((error: unknown) => {
+        if (error instanceof Error && /extension context invalidated/i.test(error.message)) {
+          contextAvailable.current = false;
+          dispatch({ type: 'CONNECTION', connected: false });
+          dispatch({ type: 'PROTOCOL_ERROR', message: 'Extension was reloaded. Refresh this Polymarket page.' });
+          return;
+        }
+        dispatch({ type: 'PROTOCOL_ERROR', message: 'Background service did not accept the command.' });
+      });
+    } catch {
+      contextAvailable.current = false;
+      dispatch({ type: 'CONNECTION', connected: false });
+      dispatch({ type: 'PROTOCOL_ERROR', message: 'Extension was reloaded. Refresh this Polymarket page.' });
+      return null;
+    }
+    return parsed.data.id;
   }, []);
 
-  return { connected, marketInfo, orders, rtdsPrice, sendMessage };
+  const clearLastError = useCallback(() => dispatch({ type: 'CLEAR_ERROR' }), []);
+  return { ...state, clearLastError, sendMessage };
 }

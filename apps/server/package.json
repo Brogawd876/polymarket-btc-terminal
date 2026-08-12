@@ -3,38 +3,41 @@
   "version": "1.0.0",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "pnpm --filter shared build && pnpm run typecheck && pnpm run bundle && node scripts/copy-assets.js",
     "start": "node dist/index.js",
+    "start:prod": "node -r dotenv/config dist/bundle.js",
     "dev": "ts-node-dev src/index.ts",
     "bundle": "esbuild src/index.ts --bundle --platform=node --target=node18 --outfile=dist/bundle.js --external:better-sqlite3 --external:*.node",
-    "package-exe": "pnpm run bundle && pkg dist/bundle.js --target node18-win-x64 --output dist/server.exe && copy node_modules\\better-sqlite3\\build\\Release\\better_sqlite3.node dist\\"
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "public:diagnose": "ts-node-dev scripts/public-diagnose.ts",
+    "live:diagnose": "ts-node-dev scripts/live-diagnose.ts",
+    "live:smoke": "ts-node-dev scripts/live-smoke.ts",
+    "db:migrate": "ts-node-dev scripts/migrate.ts",
+    "db:reset:test": "ts-node-dev scripts/reset-test.ts"
   },
   "dependencies": {
-    "@fastify/cors": "^8.5.0",
-    "@fastify/rate-limit": "^9.1.0",
-    "@fastify/websocket": "^8.3.1",
+    "@fastify/cors": "8.5.0",
+    "@fastify/rate-limit": "9.1.0",
+    "@fastify/websocket": "8.3.1",
     "@polymarket-btc/shared": "workspace:*",
     "@polymarket/clob-client-v2": "1.1.0",
-    "better-sqlite3": "^11.3.0",
-    "dotenv": "^17.4.2",
+    "better-sqlite3": "11.3.0",
+    "dotenv": "17.4.2",
     "ethers": "5.7.2",
-    "fastify": "^4.26.1",
-    "fastify-plugin": "^4.5.1",
-    "pino": "^8.19.0",
-    "ws": "^8.16.0"
+    "fastify": "4.26.1",
+    "fastify-plugin": "4.5.1",
+    "pino": "8.19.0",
+    "ws": "8.16.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.9",
-    "@types/node": "^20.11.20",
-    "@types/ws": "^8.5.10",
-    "esbuild": "^0.28.1",
-    "pkg": "^5.8.1",
-    "ts-node-dev": "^2.0.0",
-    "typescript": "^5.3.3"
-  },
-  "pkg": {
-    "assets": [
-      "node_modules/better-sqlite3/build/Release/better_sqlite3.node"
-    ]
+    "@types/better-sqlite3": "7.6.9",
+    "@types/node": "20.11.20",
+    "@types/ws": "8.5.10",
+    "esbuild": "0.28.1",
+    "ts-node-dev": "2.0.0",
+    "typescript": "5.3.3",
+    "vitest": "2.1.9"
   }
 }

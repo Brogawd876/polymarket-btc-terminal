@@ -9,11 +9,21 @@ export default defineConfig({
     name: 'Polymarket BTC Execution Terminal',
     description: '5-Minute BTC execution terminal for Polymarket',
     version: '1.0.0',
-    permissions: ['storage'],
-    host_permissions: ['*://*.polymarket.com/*']
+    permissions: ['storage', 'alarms'],
+    host_permissions: [
+      '*://*.polymarket.com/*',
+      '*://polymarket.com/*',
+      'http://localhost/*',
+      'ws://localhost/*',
+      'http://127.0.0.1/*',
+      'ws://127.0.0.1/*',
+    ]
   },
   vite: () => ({
     plugins: [react()],
+    build: {
+      sourcemap: false
+    },
     resolve: {
       alias: {
         '@polymarket-btc/shared': path.resolve(__dirname, '../../packages/shared/src/index.ts')
