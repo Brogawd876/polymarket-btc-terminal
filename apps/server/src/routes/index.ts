@@ -1009,16 +1009,32 @@ export async function registerRoutes(app: FastifyInstance) {
             if (!adapter) throw new Error('Adapter not initialized');
             const localOrder = db.prepare('SELECT * FROM orders WHERE id=? OR remoteOrderId=?').get(orderId, orderId) as any;
             if (!localOrder) throw new Error('Order not found');
-            executionService!.lifecycle.markCancelPending(localOrder.id);
-            const success = await adapter.cancelOrder(localOrder.remoteOrderId || localOrder.id);
-            if (success) {
+
+            // Pre-flight: if the order is already in a terminal or fully-filled state,
+            // resolve it locally without hitting the remote API. Calling cancelOrder on a
+            // filled order will always fail and would incorrectly stamp it RECONCILING.
+            const terminalStatuses = ['FILLED', 'CANCELLED', 'CANCELED', 'REJECTED', 'EXPIRED'];
+            const isAlreadyTerminal = terminalStatuses.includes(String(localOrder.status).toUpperCase());
+            const filledShares = parseFloat(localOrder.filledShares || '0');
+            const size = parseFloat(localOrder.size || '0');
+            const isAlreadyFullyFilled = size > 0 && filledShares >= size - 0.000001;
+
+            if (isAlreadyTerminal || isAlreadyFullyFilled) {
+              // Already resolved — just normalise to FILLED if there are fills, or CANCELLED otherwise
               executionService!.lifecycle.confirmCancelled(localOrder.id);
             } else {
-              db.transaction(() => {
-                db.prepare(`UPDATE orders SET status='RECONCILING',remoteState='CANCEL_UNKNOWN',reconciliationRequired=1,updatedAt=? WHERE id=?`)
-                  .run(Date.now(), localOrder.id);
-              })();
-              disarmLive('AMBIGUOUS_CANCELLATION');
+              executionService!.lifecycle.markCancelPending(localOrder.id);
+              const success = await adapter.cancelOrder(localOrder.remoteOrderId || localOrder.id);
+              if (success) {
+                executionService!.lifecycle.confirmCancelled(localOrder.id);
+              } else {
+                // Remote cancel returned false but order is NOT locally terminal — genuine ambiguity
+                db.transaction(() => {
+                  db.prepare(`UPDATE orders SET status='RECONCILING',remoteState='CANCEL_UNKNOWN',reconciliationRequired=1,updatedAt=? WHERE id=?`)
+                    .run(Date.now(), localOrder.id);
+                })();
+                disarmLive('AMBIGUOUS_CANCELLATION');
+              }
             }
             const storedOrder = normalizeOrderRow(db.prepare(`SELECT * FROM orders WHERE id = ?`).get(localOrder.id));
             const responseMsg = JSON.stringify({ type: 'ORDER_UPDATE', protocolVersion: PROTOCOL_VERSION, id: payload.id,
